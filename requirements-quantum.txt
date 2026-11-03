@@ -1,0 +1,3 @@
+# Optional D-Wave adapter. Installing this does not enable remote calls.
+-r requirements-hybrid.txt
+dwave-system>=1.30,<2

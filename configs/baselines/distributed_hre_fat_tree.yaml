@@ -1,0 +1,56 @@
+# Standalone baseline. CPU: cores; memory: GB; bandwidth: Mbps; delay: ms.
+# Same seed, workload, WAN and 64-server compute budget across all presets.
+schema_version: 1
+simulation: distributed_dc
+experiment:
+  name: distributed_hre_fat_tree
+  seed: 42
+  output_dir: results/distributed
+topology:
+  wan:
+    # Synthetic five-router WAN: four edge sites and one central site.
+    num_nodes: 5
+    edges: [[0, 1], [1, 2], [2, 3], [3, 0], [0, 4], [1, 4], [2, 4], [3, 4]]
+    bandwidth_mbps: 100.0  # null = unconstrained WAN bandwidth
+    latency_ms: 5.0
+  fabric:
+    type: fat_tree
+    servers_per_rack: 4
+    num_spines: 2
+    fat_tree_k: 4  # used only for fat_tree; each DC then requires k^3/4 servers
+    bandwidth_mbps: 1000.0
+    latency_ms: 0.05
+  server:
+    cpu: 8.0
+    memory_gb: 64.0
+  data_centers:
+    - {id: dc0, wan_node: 0, num_servers: 16}
+    - {id: dc1, wan_node: 1, num_servers: 16}
+    - {id: dc2, wan_node: 2, num_servers: 16}
+    - {id: dc3, wan_node: 3, num_servers: 16}
+workload:
+  num_requests: 200
+  arrival_rate_per_hour: 40.0
+  mean_lifetime_hours: 2.0
+  ingress_nodes: [0, 1, 2, 3]
+  vnfs_per_request: [4, 12]
+  cpu: [1.2, 2.4]
+  memory_gb: [2.0, 8.0]
+  bandwidth_mbps: [10.0, 90.0]
+  max_latency_ms: [30.0, 120.0]  # null disables the latency SLO
+  processing_delay_ms: 0.25  # fixed per VNF
+  return_to_ingress: false
+solver:
+  name: hre
+  scope: single_dc
+  allow_colocation: false  # distinct hosts within a request; hosts can serve multiple SFCs
+  k_paths: 4
+power:
+  # Illustrative parameters, not measured hardware profiles.
+  server_idle_w: 100.0
+  server_peak_w: 200.0
+  server_off_w: 0.0
+  switch_idle_w: 39.0
+  switch_port_w: 0.9
+  switch_off_w: 0.0
+  wan_always_on: true

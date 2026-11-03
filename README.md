@@ -91,90 +91,84 @@ Virne offers a unified and comprehensive framework for NFV-RA, with the followin
 }
 ```
 
-## Quickstart
+## Run Distributed Data Center Experiments from Source
 
-### Installation
-
-Create and activate a Python 3.12 or newer environment, then install the
-latest Virne release from PyPI:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install virne
-```
-
-The standard installation includes the complete Virne runtime and works
-without optional compiled PyG extensions. Verify the installed command with:
+This checkout includes an online SFC simulator with a WAN, multiple data centers,
+and explicit switches and servers in each data center. Run a standalone baseline
+YAML directly with `main.py`; installing the `virne` package is unnecessary.
 
 ```bash
-virne --version
+python -m pip install -r requirements-simulation.txt
+python main.py --config configs/baselines/distributed_hre.yaml
 ```
 
-To select a specific CPU or CUDA build of PyTorch and install the matching
-optional `pyg_lib` acceleration wheel, use the source installer instead. It
-supports CPU environments on Linux and macOS, plus CUDA 12.6, 13.0, and 13.2
-on Linux:
+The DC simulator requires only NetworkX and PyYAML. Use a Python 3.12+ environment.
+It supports CPU/RAM constraints, bandwidth-aware routing, optional latency SLOs,
+online arrivals/departures, and time-integrated server/network energy.
+
+| Baseline config | Purpose |
+| --- | --- |
+| `configs/baselines/centralized_ffd.yaml` | Centralized First-Fit Decreasing |
+| `configs/baselines/centralized_hre.yaml` | Centralized HRE-inspired heuristic |
+| `configs/baselines/distributed_random.yaml` | Seeded random placement |
+| `configs/baselines/distributed_ffd.yaml` | Distributed First-Fit Decreasing |
+| `configs/baselines/distributed_best_fit.yaml` | Distributed Best-Fit |
+| `configs/baselines/distributed_hre.yaml` | Distributed HRE-inspired heuristic |
+| `configs/baselines/distributed_cross_dc.yaml` | Allow a chain to span data centers |
+| `configs/baselines/distributed_hre_fat_tree.yaml` | Full k-ary fat-tree DC fabrics |
+
+Every preset uses the same offered workload and 64-server compute budget. HRE
+is an explicitly documented adaptation of the supplied paper, not an exact
+reproduction; the paper's VNFG and ONP splitting baselines are not implemented.
 
 ```bash
-git clone https://github.com/GeminiLight/virne.git
-cd virne
+# Validate without running
+python main.py --config configs/baselines/distributed_hre.yaml --validate-only
 
-# CPU-only PyTorch and PyG
-bash install.sh -c cpu
+# Run another baseline
+python main.py --config configs/baselines/distributed_best_fit.yaml
 
-# CUDA 12.6 (use 13.0 or 13.2 when appropriate for your driver and GPU)
-bash install.sh -c 12.6
+# Verify the distributed simulator without installing the legacy RL stack
+python -m pip install -r requirements-hybrid.txt
+python -m unittest discover -s tests/distributed -v
 ```
 
-The script installs Virne in editable mode and prints the installed versions.
-You can verify them again with:
+Results are saved in unique directories under
+`results/distributed/<experiment-name>/`, including resolved YAML, topology,
+workload, placements, per-request/per-event CSVs, per-DC metrics and summaries.
+
+See the [Vietnamese model and experiment guide](docs/distributed-data-centers.md)
+for setup, parameters, algorithm definitions, units, paper correspondence and
+limitations.
+
+### Adaptive Hierarchical Hybrid SFC Embedding (AHQ-SFC)
+
+AHQ-SFC adds bounded candidate reduction, a placement QUBO, exact/SA controls,
+local QAOA statevector simulation, and an optional D-Wave adapter. Its controller
+models queued decisions, deadlines and stale-state validation before admission.
 
 ```bash
-python -c "import torch, torch_geometric, virne; print(virne.__version__, torch.__version__, torch_geometric.__version__)"
+python -m pip install -r requirements-hybrid.txt
+python main.py --config configs/hybrid/distributed_ahq_adaptive.yaml
+python main.py --config configs/hybrid/distributed_hybrid_qaoa_sim.yaml
 ```
 
-### Run a Small Experiment
+The nine standalone presets in `configs/hybrid/` share offered traffic and
+controller settings. Remote QPU calls are disabled by default. See the
+[AHQ-SFC run and evaluation guide](docs/ahq-sfc-running.md) for backend selection,
+matched-seed benchmarking, offline policy fitting, quantum labeling and limits.
 
-Use a fast heuristic and ten VN requests for the first run. Calling `virne`
-without overrides starts the larger default RL experiment.
+### Existing Virne Experiments
+
+The existing Hydra/VNE/RL pipeline remains available with its original full
+runtime dependencies and configuration schema, for example:
 
 ```bash
-virne \
-  solver.solver_name=nrm_rank \
-  v_sim_setting.num_v_nets=10 \
-  training.use_cuda=false \
-  'logger.backends=[console]'
+python main.py solver.solver_name=nrm_rank v_sim_setting.num_v_nets=10 training.use_cuda=false 'logger.backends=[console]'
 ```
 
-The run finishes with `Complete` and writes its resolved configuration,
-summary, and per-event records under:
-
-```text
-results/virne/nrm_rank/<run-id>/
-```
-
-See the [Quickstart](https://virne.readthedocs.io/en/latest/start/running.html)
-for Hydra overrides and output details, and the
-[solver registry](https://virne.readthedocs.io/en/latest/solver/overview.html)
-for every valid solver command.
-
-## Choose a Solver
-
-Start with a solver that matches the purpose of your experiment:
-
-| Command | Use it for | Important note |
-| --- | --- | --- |
-| `nrm_rank` | A fast, deterministic heuristic baseline | Recommended for the first end-to-end run |
-| `random_rank` | A simple randomized baseline or sanity check | Set `experiment.seed` when comparing runs |
-| `mip` | An exact-method baseline on small instances | Requires OR-Tools and can be substantially slower |
-| `ppo_dual_gat+` | An example of the RL training and inference pipeline | Requires the learning dependencies and training |
-
-This table is intentionally limited to useful starting points. See the
-[generated solver registry](https://virne.readthedocs.io/en/latest/solver/overview.html)
-for every command registered by the current code, or follow the
-[RL Pipeline](https://virne.readthedocs.io/en/latest/intro/rl-support.html) for
-the learning-based workflow.
+These legacy solvers do not automatically use the new DC model. Use the baseline
+YAML files above for the distributed data center experiments.
 
 ## Related
 

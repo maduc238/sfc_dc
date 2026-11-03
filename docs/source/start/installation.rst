@@ -1,10 +1,8 @@
 Installation
 ============
 
-.. note::
-
-    Virne's RL environments use the ``gymnasium==1.3.0`` API. The scientific
-    stack requires NumPy 2 and Python 3.12 or newer.
+The distributed data center experiments run directly from this source checkout.
+Use Python 3.12 or newer; installing the ``virne`` package is unnecessary.
 
 Create a Virtual Environment
 ----------------------------
@@ -14,24 +12,25 @@ Create a Virtual Environment
     python3 -m venv .venv
     source .venv/bin/activate
 
-Install from PyPI
------------------
+Install Simulation Dependencies
+-------------------------------
 
-Install the latest Virne release and verify its command-line entry point:
+From the repository root, install the two libraries used by the DC simulator:
 
 .. code-block:: bash
 
-    python -m pip install virne
-    virne --version
+    python -m pip install -r requirements-simulation.txt
+    python main.py --config configs/baselines/distributed_hre.yaml --validate-only
 
-The standard installation includes the complete Virne runtime. PyG's optional
-compiled extensions are not required for correctness.
+On Windows, use ``.venv\Scripts\python.exe`` after creating the virtual
+environment. The new simulator needs NetworkX and PyYAML only. Continue to the
+:doc:`Quickstart <running>` to run a baseline.
 
-Select a CPU or CUDA Build
---------------------------
+Legacy VNE/RL Runtime
+--------------------
 
-When you need to select an exact CPU or CUDA build of PyTorch, clone the source
-repository and use the installation script. It supports CPU environments on
+The existing VNE/RL pipeline has additional dependencies. For that pipeline,
+the source installation script supports CPU environments on
 Linux and macOS, plus CUDA 12.6, 13.0, and 13.2 on Linux. It installs PyTorch
 2.13.0, PyG 2.8.0.post1, Gymnasium 1.3.0, Virne in editable mode, and the
 matching optional ``pyg_lib`` acceleration wheel.
@@ -57,7 +56,7 @@ Keep the virtual environment active and run:
 
 .. code-block:: bash
 
-    virne --version
+    python main.py --version
     python -c "import gymnasium, torch, torch_geometric, virne; print(virne.__version__, gymnasium.__version__, torch.__version__, torch_geometric.__version__)"
 
 The command should print the installed Virne, Gymnasium, PyTorch, and PyG

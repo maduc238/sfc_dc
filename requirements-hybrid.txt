@@ -1,0 +1,3 @@
+# Local QAOA statevector simulation and offline policy fitting only.
+-r requirements-simulation.txt
+numpy>=1.26,<3

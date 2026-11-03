@@ -1,0 +1,154 @@
+# AHQ-SFC comparison preset; 100 requests, seed 42, 64 servers, identical controller budgets.
+# Controller latencies are a declared MODEL, not measured QPU performance.
+schema_version: 1
+simulation: distributed_dc
+experiment:
+  name: distributed_hybrid_exact
+  seed: 42
+  output_dir: results/hybrid
+topology:
+  wan:
+    num_nodes: 5
+    edges:
+    - - 0
+      - 1
+    - - 1
+      - 2
+    - - 2
+      - 3
+    - - 3
+      - 0
+    - - 0
+      - 4
+    - - 1
+      - 4
+    - - 2
+      - 4
+    - - 3
+      - 4
+    bandwidth_mbps: 100.0
+    latency_ms: 5.0
+  fabric:
+    type: leaf_spine
+    servers_per_rack: 4
+    num_spines: 2
+    fat_tree_k: 4
+    bandwidth_mbps: 1000.0
+    latency_ms: 0.05
+  server:
+    cpu: 8.0
+    memory_gb: 64.0
+  data_centers:
+  - id: dc0
+    wan_node: 0
+    num_servers: 16
+  - id: dc1
+    wan_node: 1
+    num_servers: 16
+  - id: dc2
+    wan_node: 2
+    num_servers: 16
+  - id: dc3
+    wan_node: 3
+    num_servers: 16
+workload:
+  num_requests: 100
+  arrival_rate_per_hour: 40.0
+  mean_lifetime_hours: 2.0
+  ingress_nodes:
+  - 0
+  - 1
+  - 2
+  - 3
+  vnfs_per_request:
+  - 4
+  - 12
+  cpu:
+  - 1.2
+  - 2.4
+  memory_gb:
+  - 2.0
+  - 8.0
+  bandwidth_mbps:
+  - 10.0
+  - 90.0
+  max_latency_ms:
+  - 30.0
+  - 120.0
+  processing_delay_ms: 0.25
+  return_to_ingress: false
+solver:
+  name: ahq
+  scope: single_dc
+  allow_colocation: false
+  k_paths: 4
+hybrid:
+  incumbent_solver: hre
+  max_dcs: 2
+  neighborhood_size: 4
+  candidates_per_vnf: 3
+  max_neighborhoods: 2
+  max_variables: 32
+  max_backend_calls: 2
+  max_validations: 256
+  budget_ms: 500.0
+  optimize_existing: true
+  objective:
+    power_weight: 1.0
+    latency_weight: 1.0
+    power_reference_w: 1000.0
+    latency_reference_ms: 100.0
+  policy:
+    name: static
+    static_backend: exact
+    quantum_backend: qaoa_sim
+    exact_max_assignments: 256
+    exact_ms_per_assignment: 0.25
+    minimum_remaining_ms: 2.0
+    quantum_expected_gain: 0.0
+    quantum_minimum_gain: 0.05
+    quantum_expected_ms: 100.0
+    model_path: ''
+  exact:
+    max_assignments: 4096
+  sa:
+    reads: 24
+    sweeps: 80
+    beta_start: 0.1
+    beta_end: 5.0
+  qaoa:
+    max_variables: 16
+    layers: 1
+    evaluations: 12
+    shots: 128
+    readout_flip_probability: 0.0
+  qa:
+    enabled: false
+    solver: ''
+    num_reads: 100
+    annealing_time_us: 20.0
+    max_calls_per_run: 0
+    estimated_cost_per_call: 0.0
+    max_cost_per_run: 0.0
+    timeout_ms: 20000.0
+control_plane:
+  enabled: true
+  workers: 2
+  decision_timeout_ms: 1000
+  latency_mode: modeled
+  base_latency_ms: 1.0
+  validation_latency_ms: 0.1
+  backend_latency_ms:
+    exact: 2.0
+    sa: 5.0
+    qaoa_sim: 25.0
+    qa: 100.0
+  trace_ms: []
+power:
+  server_idle_w: 100.0
+  server_peak_w: 200.0
+  server_off_w: 0.0
+  switch_idle_w: 39.0
+  switch_port_w: 0.9
+  switch_off_w: 0.0
+  wan_always_on: true
