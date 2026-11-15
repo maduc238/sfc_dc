@@ -1,22 +1,3 @@
-<div align="center">
-  <img src="https://raw.githubusercontent.com/GeminiLight/virne/main/resources/figures/virne-logo-text.png" width="200" alt="Virne logo">
-  <h2>A Comprehensive Simulator & Benchmark for NFV-RA</h2>
-  <p>
-    <a href="https://deepwiki.com/GeminiLight/virne"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
-    <a href="https://github.com/GeminiLight/virne/releases"><img src="https://img.shields.io/badge/version-1.0.0-blue" alt="Virne version 1.0.0"></a>
-    <a href="https://pypi.org/project/virne/"><img src="https://img.shields.io/pypi/v/virne?label=pypi" alt="Virne on PyPI"></a>
-    <a href="https://github.com/GeminiLight/virne/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="Apache 2.0 license"></a>
-  </p>
-  <p>
-    <a href="https://arxiv.org/abs/2507.19234">✨ Benchmark Paper</a> &nbsp;&nbsp;•&nbsp;&nbsp;
-    <a href="https://virne.readthedocs.io">Documentation</a> &nbsp;&nbsp;•&nbsp;&nbsp;
-    <a href="https://github.com/GeminiLight/virne?tab=readme-ov-file#citations">Citations</a> &nbsp;&nbsp;•&nbsp;&nbsp;
-    <a href="https://github.com/GeminiLight/sdn-nfv-papers">SDN-NFV Papers</a>
-  </p>
-</div>
-
---------------------------------------------------------------------------------
-
 **Virne** is a simulator and benchmark for **resource allocation (RA) in Network Functions Virtualisation (NFV)**, with unified support for traditional and **reinforcement learning (RL)**-based algorithms.
 
 > In the literature, RA in NFV is often termed Virtual Network Embedding (VNE), Virtual Network Function (VNF) placement, service function chain (SFC) deployment, or network slicing in 5G.
@@ -34,10 +15,6 @@ Virne offers a unified and comprehensive framework for NFV-RA, with the followin
 > ✨ If you have any questions, please open a new issue or contact me via email (wtfly2018@gmail.com)
 
 ![Virne architecture: simulation, solver, environment, and evaluation components](https://raw.githubusercontent.com/GeminiLight/virne/main/resources/figures/virne-architecture.png)
-
-### Citations
-
-> ❤️ If you find Virne helpful to your research, please feel free to cite our related papers.
 
 #### Benchmark Paper
 
@@ -108,8 +85,6 @@ online arrivals/departures, and time-integrated server/network energy.
 
 | Baseline config | Purpose |
 | --- | --- |
-| `configs/baselines/centralized_ffd.yaml` | Centralized First-Fit Decreasing |
-| `configs/baselines/centralized_hre.yaml` | Centralized HRE-inspired heuristic |
 | `configs/baselines/distributed_random.yaml` | Seeded random placement |
 | `configs/baselines/distributed_ffd.yaml` | Distributed First-Fit Decreasing |
 | `configs/baselines/distributed_best_fit.yaml` | Distributed Best-Fit |
@@ -117,9 +92,7 @@ online arrivals/departures, and time-integrated server/network energy.
 | `configs/baselines/distributed_cross_dc.yaml` | Allow a chain to span data centers |
 | `configs/baselines/distributed_hre_fat_tree.yaml` | Full k-ary fat-tree DC fabrics |
 
-Every preset uses the same offered workload and 64-server compute budget. HRE
-is an explicitly documented adaptation of the supplied paper, not an exact
-reproduction; the paper's VNFG and ONP splitting baselines are not implemented.
+Every preset uses the same offered workload and 64-server compute budget. HRE is an explicitly documented adaptation of the supplied paper, not an exact reproduction; the paper's VNFG and ONP splitting baselines are not implemented.
 
 ```bash
 # Validate without running
@@ -133,19 +106,13 @@ python -m pip install -r requirements-hybrid.txt
 python -m unittest discover -s tests/distributed -v
 ```
 
-Results are saved in unique directories under
-`results/distributed/<experiment-name>/`, including resolved YAML, topology,
-workload, placements, per-request/per-event CSVs, per-DC metrics and summaries.
+Results are saved in unique directories under `results/distributed/<experiment-name>/`, including resolved YAML, topology, workload, placements, per-request/per-event CSVs, per-DC metrics and summaries.
 
-See the [Vietnamese model and experiment guide](docs/distributed-data-centers.md)
-for setup, parameters, algorithm definitions, units, paper correspondence and
-limitations.
+See the [Vietnamese model and experiment guide](docs/distributed-data-centers.md) for setup, parameters, algorithm definitions, units, paper correspondence and limitations.
 
 ### Adaptive Hierarchical Hybrid SFC Embedding (AHQ-SFC)
 
-AHQ-SFC adds bounded candidate reduction, a placement QUBO, exact/SA controls,
-local QAOA statevector simulation, and an optional D-Wave adapter. Its controller
-models queued decisions, deadlines and stale-state validation before admission.
+AHQ-SFC adds bounded candidate reduction, a placement QUBO, exact/SA controls, local QAOA statevector simulation, and an optional D-Wave adapter. Its controller models queued decisions, deadlines and stale-state validation before admission.
 
 ```bash
 python -m pip install -r requirements-hybrid.txt
@@ -153,22 +120,17 @@ python main.py --config configs/hybrid/distributed_ahq_adaptive.yaml
 python main.py --config configs/hybrid/distributed_hybrid_qaoa_sim.yaml
 ```
 
-The nine standalone presets in `configs/hybrid/` share offered traffic and
-controller settings. Remote QPU calls are disabled by default. See the
-[AHQ-SFC run and evaluation guide](docs/ahq-sfc-running.md) for backend selection,
-matched-seed benchmarking, offline policy fitting, quantum labeling and limits.
+The nine standalone presets in `configs/hybrid/` share offered traffic and controller settings. Remote QPU calls are disabled by default. See the [AHQ-SFC run and evaluation guide](docs/ahq-sfc-running.md) for backend selection, matched-seed benchmarking, offline policy fitting, quantum labeling and limits.
 
 ### Existing Virne Experiments
 
-The existing Hydra/VNE/RL pipeline remains available with its original full
-runtime dependencies and configuration schema, for example:
+The existing Hydra/VNE/RL pipeline remains available with its original full runtime dependencies and configuration schema, for example:
 
 ```bash
 python main.py solver.solver_name=nrm_rank v_sim_setting.num_v_nets=10 training.use_cuda=false 'logger.backends=[console]'
 ```
 
-These legacy solvers do not automatically use the new DC model. Use the baseline
-YAML files above for the distributed data center experiments.
+These legacy solvers do not automatically use the new DC model. Use the baseline YAML files above for the distributed data center experiments.
 
 ## Related
 
