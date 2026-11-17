@@ -57,6 +57,17 @@ def simulate(config):
     admission_delays = [r['admission_delay_ms'] for r in records if r['accepted']]
     backend_calls = execution['backend_calls']
     decisions = execution['decisions']
+    migrations = execution['migrations']
+    migration_decisions = execution['migration_decisions']
+    profile_hash = hashlib.sha256(json.dumps(execution['migration_profiles'], sort_keys=True).encode()).hexdigest()
+    service_latency_integral = service_seconds = 0.0
+    for interval in allocations:
+        duration = interval['end_s'] - interval['start_s']
+        duration -= sum(max(0.0, min(interval['end_s'], outage['end_s'])
+                            - max(interval['start_s'], outage['start_s']))
+                        for outage in execution['outages'] if outage['request_id'] == interval['request_id'])
+        service_seconds += max(0.0, duration)
+        service_latency_integral += max(0.0, duration) * interval['latency_ms']
     summary = {
         'schema_version': 1, 'experiment': config['experiment']['name'],
         'solver': config['solver']['name'], 'scope': config['solver']['scope'],
@@ -93,6 +104,28 @@ def simulate(config):
         'admitted_rescues': sum(d.get('rescued', False) and d['admitted'] for d in decisions),
         'improved_proposals': sum(d.get('improved', False) for d in decisions),
         'decision_budget_exhaustions': sum(d.get('budget_exhausted', False) for d in decisions),
+        'migration_enabled': config['migration']['enabled'], 'migration_profiles_sha256': profile_hash,
+        'migration_attempts': len(migrations),
+        'migration_completed': sum(m['committed'] for m in migrations),
+        'migration_aborted': sum(not m['committed'] for m in migrations),
+        'migration_decisions': len(migration_decisions),
+        'migration_rounds_busy': counters['migration_rounds_busy'],
+        'migration_candidates': sum(d['candidates'] for d in migration_decisions),
+        'migration_candidates_timeout': sum(d['rejected_candidates'].get('timeout', 0) for d in migration_decisions),
+        'migration_candidates_non_convergent': sum(d['rejected_candidates'].get('non_convergent', 0) for d in migration_decisions),
+        'migration_candidates_temporary_capacity': sum(d['rejected_candidates'].get('temporary_capacity', 0) for d in migration_decisions),
+        'migration_candidates_no_improvement': sum(d['rejected_candidates'].get('no_improvement', 0) for d in migration_decisions),
+        'migration_planning_wall_time_ms': sum(d['wall_time_ms'] for d in migration_decisions),
+        'migration_data_mbit': sum(m['transferred_mbit'] for m in migrations),
+        'migration_data_mbit_hops': sum(m['transferred_mbit_hops'] for m in migrations),
+        'migration_downtime_s': sum(m['downtime_s'] for m in migrations),
+        'migration_p95_downtime_s': percentile([m['downtime_s'] for m in migrations], 95),
+        'migration_normalized_cost': sum(m['actual_normalized_cost'] for m in migrations),
+        'migration_route_changes': sum(m['applied_route_changes'] for m in migrations),
+        'migration_standby_core_seconds': integrals['migration_reserved_cpu'],
+        'migration_copy_core_seconds': integrals['migration_copy_cpu'],
+        'migration_reserved_gb_seconds': integrals['migration_reserved_memory_gb'],
+        'time_weighted_service_latency_ms': service_latency_integral / service_seconds if service_seconds else None,
         'horizon_s': horizon, 'energy_kwh': energy_kwh,
         'server_energy_kwh': integrals['server_power_w'] / 3_600_000.0,
         'network_energy_kwh': integrals['network_power_w'] / 3_600_000.0,
@@ -110,30 +143,33 @@ def simulate(config):
         'p95_latency_ms': latencies[max(0, (95 * accepted + 99) // 100 - 1)] if accepted else None,
         'mean_placement_time_ms': sum(r['placement_time_ms'] for r in records) / len(records),
         'runtime_s': time.perf_counter() - wall_start,
-        'resources_released': not substrate.active and all(v == 0 for resource in (
-            substrate.cpu, substrate.memory, substrate.bandwidth) for v in resource.values()),
+        'resources_released': not substrate.active and not substrate.reservations and all(v == 0 for resource in (
+            substrate.cpu, substrate.memory, substrate.bandwidth, substrate.paused_cpu) for v in resource.values()),
     }
     per_dc = []
     for dc in config['topology']['data_centers']:
         dc_id = dc['id']
         hosts = {h for h in substrate.servers if substrate.graph.nodes[h]['dc'] == dc_id}
-        vnf_count = 0
+        hosted_vnfs, hosted_requests = set(), set()
         cpu_seconds = memory_seconds = 0.0
-        request_count = 0
         for allocation in allocations:
             request = requests[allocation['request_id']]
             local_vnfs = [request.vnfs[i] for i, h in allocation['placement'].items() if h in hosts]
-            request_count += bool(local_vnfs)
-            vnf_count += len(local_vnfs)
-            cpu_seconds += sum(v.cpu for v in local_vnfs) * request.lifetime
-            memory_seconds += sum(v.memory_gb for v in local_vnfs) * request.lifetime
-        per_dc.append({'data_center': dc_id, 'num_servers': len(hosts), 'hosted_requests': request_count,
-                       'hosted_vnfs': vnf_count,
+            if local_vnfs:
+                hosted_requests.add(request.id)
+            hosted_vnfs.update((request.id, i) for i, h in allocation['placement'].items() if h in hosts)
+            duration = allocation['end_s'] - allocation['start_s']
+            cpu_seconds += sum(v.cpu for v in local_vnfs) * duration
+            memory_seconds += sum(v.memory_gb for v in local_vnfs) * duration
+        per_dc.append({'data_center': dc_id, 'num_servers': len(hosts), 'hosted_requests': len(hosted_requests),
+                       'hosted_vnfs': len(hosted_vnfs),
                        'mean_cpu_utilization': cpu_seconds / horizon / sum(substrate.graph.nodes[h]['cpu'] for h in hosts),
                        'mean_memory_utilization': memory_seconds / horizon / sum(substrate.graph.nodes[h]['memory_gb'] for h in hosts)})
     return {'summary': summary, 'records': records, 'events': snapshots, 'allocations': allocations,
             'workload': offered, 'per_dc': per_dc, 'substrate': substrate,
             'backend_calls': execution['backend_calls'], 'decisions': execution['decisions'],
+            'migrations': migrations, 'migration_decisions': migration_decisions,
+            'migration_profiles': execution['migration_profiles'], 'outages': execution['outages'],
             'policy_model': getattr(getattr(solver, 'policy', None), 'model', None)}
 
 
@@ -144,7 +180,8 @@ def run(config, source=None):
     output = Path(exp['output_dir']).expanduser().resolve() / exp['name'] / f'{stamp}-{uuid.uuid4().hex[:8]}'
     output.mkdir(parents=True, exist_ok=False)
     (output / 'config.yaml').write_text(yaml.safe_dump(config, sort_keys=False), encoding='utf-8')
-    for name in ('summary', 'workload', 'allocations', 'backend_calls', 'decisions'):
+    for name in ('summary', 'workload', 'allocations', 'backend_calls', 'decisions',
+                 'migrations', 'migration_decisions', 'migration_profiles', 'outages'):
         _json(output / f'{name}.json', result[name])
     policy_hash = None
     if result['policy_model'] is not None:
@@ -153,6 +190,9 @@ def run(config, source=None):
     for name in ('records', 'events', 'per_dc'):
         _csv(output / f'{name}.csv', result[name])
     _csv(output / 'summary.csv', [result['summary']])
+    _csv(output / 'migrations.csv', [{k: v for k, v in row.items() if k not in (
+        'rounds', 'copy_path', 'old_placement', 'new_placement', 'old_paths', 'new_paths')}
+                                     for row in result['migrations']])
     graph = result['substrate'].graph
     _json(output / 'topology.json', {
         'directed': False, 'nodes': [{'id': n, **attrs} for n, attrs in graph.nodes(data=True)],
@@ -171,6 +211,10 @@ def run(config, source=None):
                                    'qpu_enabled': config['hybrid']['qa']['enabled'],
                                    'policy_model_sha256': policy_hash,
                                    'controller_latency_mode': config['control_plane']['latency_mode'],
+                                   'migration_enabled': config['migration']['enabled'],
+                                   'migration_model': 'serial_single_vnf_bounded_precopy',
+                                   'placement_history_schema_version': 2,
+                                   'migration_profiles_sha256': result['summary']['migration_profiles_sha256'],
                                    'created_utc': stamp, 'workload_sha256': result['summary']['workload_sha256']})
     return output, result['summary']
 

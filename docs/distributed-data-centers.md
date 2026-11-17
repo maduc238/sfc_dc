@@ -2,7 +2,9 @@
 
 Chạy mã nguồn trực tiếp từ repository bằng `main.py --config <file.yaml>`. Mô-đun `virne.distributed` bổ sung bài toán DC phân cấp vào repository Virne; nó có vòng lặp sự kiện và solver riêng vì mô hình VNE cũ không phân biệt router, switch và server.
 
-AHQ-SFC và bộ cấu hình hybrid mới được mô tả trong [hướng dẫn AHQ-SFC](ahq-sfc-running.md). Các baseline ở tài liệu này tiếp tục hoạt động với controller delay mặc định tắt.
+AHQ-SFC và bộ cấu hình hybrid được mô tả trong [hướng dẫn AHQ-SFC](ahq-sfc-running.md). Mọi cấu hình baseline và hybrid đều có controller delay và migration với cùng tham số hệ thống.
+
+Các thí nghiệm chạy trên CPU; QAOA trong AHQ-SFC là mô phỏng statevector bằng NumPy.
 
 ## Cài thư viện và chạy
 
@@ -38,7 +40,7 @@ Mỗi file trong `configs/baselines/` là một cấu hình độc lập, có đ
 | `distributed_cross_dc.yaml` | HRE-inspired, thêm tập server toàn mạng | Cho phép các VNF của một SFC ở nhiều DC |
 | `distributed_hre_fat_tree.yaml` | HRE-inspired | 4 DC, mỗi DC là fat-tree k=4, 16 server |
 
-Tất cả cấu hình có cùng 64 server, tổng 512 CPU core và 4096 GB RAM, cùng WAN, seed và workload. Dùng `centralized_hre` với `distributed_hre` để so sánh vị trí DC; dùng bốn cấu hình distributed Random/FFD/Best-Fit/HRE để so sánh thuật toán. Cấu hình fat-tree thay đổi fabric nên cần phân tích riêng ảnh hưởng của topology.
+Tất cả cấu hình trong `configs/baselines` có cùng 64 server, tổng 512 CPU core và 4096 GB RAM, cùng WAN, seed, workload, controller và tham số migration. Dùng `centralized_hre` với `distributed_hre` để so sánh vị trí DC; dùng bốn cấu hình distributed Random/FFD/Best-Fit/HRE để so sánh thuật toán. Cấu hình fat-tree thay đổi fabric nên được phân tích riêng ảnh hưởng của topology.
 
 ## Mô hình vật lý và workload
 
@@ -62,7 +64,7 @@ WAN router / ingress
 - Arrival là Poisson, tức khoảng cách giữa các arrival có phân phối exponential; lifetime cũng exponential. Đơn vị cấu hình là request/giờ và giờ; event dùng giây. Yêu cầu được xử lý online, departure trước arrival nếu cùng thời điểm.
 - Workload là **chuỗi tuyến tính có thứ tự**: ingress → VNF0 → VNF1 → ... với demand CPU/RAM cho từng VNF, bandwidth cho từng đoạn và SLO độ trễ toàn chuỗi. Có thể bật `return_to_ingress` để dự trữ cả đoạn cuối quay về ingress. Các demand lấy uniform trong khoảng `[min, max]`.
 - `max_latency_ms: null` tắt SLO. Độ trễ bằng tổng độ trễ link trên các đoạn cộng processing delay cố định của từng VNF. Chưa có hàng đợi hay packet-level simulation; đây là mô hình admission/resource allocation.
-- `solver.allow_colocation: false` yêu cầu các VNF **trong cùng một SFC** dùng server khác nhau. Các SFC khác nhau vẫn chia sẻ server nếu đủ tài nguyên. Bật `true` cho phép nhiều VNF cùng server, đoạn liên kết tại chỗ dùng 0 hop.
+- `solver.allow_colocation: false` yêu cầu các VNF **trong cùng một SFC** dùng server khác nhau. Các SFC khác nhau vẫn chia sẻ server nếu đủ tài nguyên. Colocation chỉ được hỗ trợ trong chế độ admission khi tắt migration; các cấu hình chuẩn giữ `false`.
 
 Đổi quy mô bằng cách sửa `data_centers` và `num_servers` trong YAML. Muốn so sánh công bằng, giữ tổng CPU/RAM như nhau giữa các kiến trúc và giữ workload/seed.
 
@@ -80,11 +82,45 @@ Mọi baseline route các đoạn có bandwidth lớn trước trên đồ thị
 
 Placement và routing đều là tentative đến khi toàn bộ CPU, RAM, bandwidth và SLO hợp lệ. Khi thất bại, tài nguyên đang chạy không đổi; khi SFC hết hạn, mọi resource đã đặt được giải phóng. Các heuristic không tìm tất cả mapping/path: rejection chỉ có nghĩa thuật toán không tìm được nghiệm trong tập ứng viên.
 
+## Migration trong vòng đời SFC
+
+Migration bật mặc định trong `configs/baselines` và `configs/hybrid`. Cùng một heuristic classical định kỳ xét VNF trên server ít tải, thử chuyển sang server đang hoạt động và giữ phương án có lợi ích lớn nhất trong giới hạn candidate/budget. Mỗi lần chỉ chuyển một VNF, toàn hệ thống chỉ có một migration đang chạy. VNF đích luôn thuộc DC của VNF nguồn, kể cả khi SFC của baseline `cross_dc` trải qua nhiều DC.
+
+Mô hình pre-copy giới hạn số vòng dựa trên [SLAMIG](https://arxiv.org/html/2101.09716v1). Profile `state_mb` và `dirty_rate_mbps` được sinh bằng RNG riêng, độc lập với RAM quota và workload. Nguồn tiếp tục phục vụ trong lúc copy; đích giữ trước CPU/RAM. Copy traffic và phần bandwidth tăng thêm của route đích cùng chiếm capacity, nên arrival mới phải tôn trọng các reservation này. Bandwidth copy giữ cố định trong mỗi migration.
+
+Chỉ chuyển khi lợi ích vượt `minimum_improvement`:
+
+```text
+gain = energy_weight * (E_keep - E_move) / energy_reference_j
+     + latency_weight * (D_old - D_new) / latency_reference_ms
+     - migration_weight * C_migration
+
+C_migration = transferred_Mbit * copy_path_hops / transfer_reference_mbit_hops
+            + downtime_s / downtime_reference_s
+            + route_changes / route_reference_changes
+```
+
+E_keep và E_move dùng cùng cửa sổ dự báo cố định H, không đọc lifetime còn lại hoặc arrival tương lai. E_move gồm thời gian nguồn và đích cùng giữ tài nguyên. Route changes đếm thêm/xóa cạnh có hướng theo từng đoạn chain. Request mới chưa có vị trí cũ nên migration cost bằng 0 ở admission; khi tái bố trí, cost được tính vào lựa chọn giữ hay chuyển và được ghi vào kết quả.
+
+| Tham số trong `migration` | Mặc định |
+| --- | --- |
+| `interval_s`, `cooldown_s` | Xét mỗi 300 s; chờ 600 s sau mỗi lần chuyển của request |
+| `max_candidates`, `budget_ms` | Tối đa 64 candidate và 250 ms CPU mỗi vòng |
+| `profile.state_mb`, `profile.dirty_rate_mbps` | Uniform 64–256 MB và 1–10 Mbit/s |
+| `bandwidth_mbps`, `max_precopy_rounds`, `timeout_s` | Cap 200 Mbit/s, tối đa 10 vòng và 60 s |
+| `max_downtime_s`, `downtime_budget_s` | Tối đa 0,1 s/lần và 1 s/request |
+| `copy_cpu`, `copy_buffer_mb` | Giữ thêm 0,1 core và 16 MB buffer ở mỗi đầu |
+| `objective.migration_weight`, `objective.horizon_s` | Hệ số cost 0,1; cửa sổ dự báo 600 s |
+
+Các khóa còn lại lấy mặc định từ `virne/distributed/config.py`. Profile và các mức tham chiếu là tham số mô phỏng tổng hợp, chưa hiệu chỉnh từ thiết bị thực. Giữ cùng toàn bộ cấu hình `migration` khi so sánh thuật toán; công cụ benchmark kiểm tra điều kiện này.
+
+Controller dùng hai worker, admission deadline 1000 ms và latency `modeled` trong các preset. Admission được ưu tiên; quyết định migration dùng worker còn trống và trả worker khi bắt đầu copy. Candidate vượt capacity, timeout hoặc downtime SLA bị loại trước khi thực thi. Sau pre-copy, VNF dừng một thời gian ngắn để đồng bộ state còn lại, cutover thay allocation gốc và cleanup giải phóng tài nguyên cũ. Departure giữ nguyên timestamp từ admission, xử lý trước cutover cùng thời điểm; nếu request kết thúc trong migration thì hủy phần còn lại và ghi chi phí đã phát sinh.
+
 ## Công suất, năng lượng và kết quả
 
-Server có VNF: `P = idle + (peak - idle) × CPU_utilization`; server rỗng dùng `server_off_w`. Switch có link đang sử dụng dùng `switch_idle_w + số port đang hoạt động × switch_port_w`; switch rỗng dùng `switch_off_w`. WAN router luôn bật nếu `wan_always_on: true`. Đếm port ở mỗi đầu switch của link; NIC của server nằm trong công suất server. Mô hình không có thời gian khởi động, PUE/cooling, DVFS hoặc port speed thích nghi.
+Server có VNF: `P = idle + (peak - idle) × CPU_utilization`; server rỗng dùng `server_off_w`. Khi migration, server đích được bật nhưng CPU giữ trước chưa được tính như một VNF đang xử lý traffic; CPU copy được tính riêng, và CPU dịch vụ của VNF nguồn được bỏ khỏi công suất động trong downtime. Switch có link đang sử dụng dùng `switch_idle_w + số port đang hoạt động × switch_port_w`; switch rỗng dùng `switch_off_w`. WAN router luôn bật nếu `wan_always_on: true`. Đếm port ở mỗi đầu switch của link; NIC của server nằm trong công suất server. Mô hình không có PUE/cooling, DVFS hoặc port speed thích nghi.
 
-Tích phân công suất theo khoảng thời gian **giữa các sự kiện**, đổi W·s sang kWh bằng chia 3.600.000. Cửa sổ đo của mọi baseline là `[0, max(arrival + lifetime của tất cả request được sinh)]`, kể cả request bị từ chối. Nhờ đó baseline từ chối nhiều request không tự có cửa sổ đo ngắn hơn. Các mean utilization cũng được tính trọng số thời gian trên cửa sổ này.
+Tích phân công suất theo khoảng thời gian **giữa các sự kiện**, đổi W·s sang kWh bằng chia 3.600.000. Với controller bật, cửa sổ đo chung là `[0, max(arrival + admission_deadline + lifetime)]` của tất cả request được sinh, kể cả request bị từ chối. Migration không kéo dài lifetime hoặc cửa sổ đo. Utilization tính theo thời gian và bao gồm tài nguyên giữ trước; năng lượng tính theo công suất dịch vụ và overhead thực của các pha.
 
 Mỗi lần chạy tạo thư mục riêng:
 
@@ -94,7 +130,12 @@ results/distributed/<experiment.name>/<UTC-time>-<unique-id>/
   manifest.json     # file nguồn, checksum mã nguồn/workload, phiên bản Python/thư viện
   topology.json     # node/edge và tài nguyên ban đầu
   workload.json     # toàn bộ yêu cầu được sinh, kể cả yêu cầu bị từ chối
-  allocations.json  # ánh xạ VNF và đường đi cho yêu cầu được nhận
+  allocations.json  # lịch sử placement/route với start_s, end_s, generation
+  migration_profiles.json  # state và dirty rate theo request/VNF
+  migration_decisions.json # candidate, lý do loại và thời gian quyết định
+  migrations.json   # source/target, các pha, dữ liệu truyền, cost dự báo và thực tế
+  migrations.csv    # số liệu phẳng, khi có migration bắt đầu
+  outages.json      # các khoảng SFC ngừng phục vụ
   records.csv       # mỗi request: kết quả, latency, DC, thời gian solver
   events.csv        # mỗi sự kiện: active request/server/switch, utilization, power
   per_dc.csv        # số VNF/request phục vụ và utilization từng DC
@@ -104,9 +145,9 @@ results/distributed/<experiment.name>/<UTC-time>-<unique-id>/
 
 `summary` gồm acceptance ratio, rejection theo compute/bandwidth/latency, energy tổng/server/network, mean power, utilization, active server, latency trung bình/p95, cross-DC request và thời gian solver. Lý do rejection ghi ràng buộc sâu nhất đã thử: latency nếu từng route đủ bandwidth nhưng vi phạm SLO; bandwidth nếu từng placement đủ CPU/RAM nhưng route thất bại; còn lại compute.
 
-`energy_kwh_per_accepted_request` là tổng năng lượng toàn hệ thống/các request được nhận, gồm cả năng lượng nền. Không gọi đại lượng này là công suất mỗi SFC. Khi không có request được nhận, latency/energy-per-request là null. Với WAN không giới hạn, utilization WAN là null vì không có mẫu số hữu hạn.
+`records.csv` có downtime và availability từng request. `mean_latency_ms`/`p95_latency_ms` giữ nghĩa tại admission; `time_weighted_service_latency_ms` tính theo lịch sử placement và loại downtime. Per-DC CPU/RAM tính theo thời gian từng placement, không nhân lại toàn lifetime sau mỗi lần chuyển.
 
-Kiểm tra `workload_sha256` giống nhau trước khi đối chiếu baseline. Cùng seed, workload và cấu hình cho cùng placement/metrics; thời gian thực thi và tên thư mục kết quả không cố định. Để kết luận nghiên cứu, cần nhiều seed và mức tải, không suy rộng từ một lần chạy demo.
+`energy_kwh_per_accepted_request` là tổng năng lượng toàn hệ thống/các request được nhận, gồm cả năng lượng nền. Không gọi đại lượng này là công suất mỗi SFC. Khi không có request được nhận, latency/energy-per-request là null. Với WAN không giới hạn, utilization WAN là null vì không có mẫu số hữu hạn.
 
 ## Kiểm thử
 

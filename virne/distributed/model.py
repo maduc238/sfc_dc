@@ -1,6 +1,7 @@
 """Physical topology, immutable SFC demands and transactional resource accounting."""
 
 from dataclasses import asdict, dataclass, field
+from copy import copy
 from itertools import pairwise
 from math import ceil
 import random
@@ -162,6 +163,8 @@ class Substrate:
         self.memory = dict.fromkeys(self.servers, 0.0)
         self.bandwidth = dict.fromkeys((edge_key(*e) for e in self.graph.edges), 0.0)
         self.active = {}
+        self.reservations = {}
+        self.paused_cpu = dict.fromkeys(self.servers, 0.0)
         self.version = 0
 
     def can_host(self, host, vnf, trial):
@@ -201,6 +204,54 @@ class Substrate:
                 if abs(used[key]) < EPSILON:
                     used[key] = 0.0
 
+    def fork(self):
+        """Cheap isolated ledger view; topology and immutable allocations are shared."""
+        view = copy(self)
+        for key in ('cpu', 'memory', 'bandwidth', 'active', 'reservations', 'paused_cpu'):
+            setattr(view, key, dict(getattr(self, key)))
+        return view
+
+    def without_request(self, request_id):
+        view = self.fork()
+        view.release(request_id)
+        return view
+
+    def reserve_temporary(self, key, allocation, standby_cpu, copy_cpu, migration_bandwidth):
+        """A reservation consumes capacity without creating a second service request."""
+        if key in self.reservations:
+            raise ValueError('Reservation already exists')
+        view = self.fork()
+        # Reuse the transactional capacity checks without adding to active services.
+        temporary_id = -1
+        if temporary_id in view.active:
+            raise ValueError('Negative request IDs are reserved for internal transactions')
+        transaction = copy(allocation)
+        transaction.request_id = temporary_id
+        view.commit(transaction)
+        for used, extra in ((self.cpu, allocation.cpu), (self.memory, allocation.memory),
+                            (self.bandwidth, allocation.bandwidth)):
+            for resource, amount in extra.items():
+                used[resource] += amount
+        self.reservations[key] = {'allocation': allocation, 'standby_cpu': dict(standby_cpu),
+                                  'copy_cpu': dict(copy_cpu), 'migration_bandwidth': dict(migration_bandwidth)}
+        self.version += 1
+
+    def release_temporary(self, key):
+        allocation = self.reservations.pop(key)['allocation']
+        for used, extra in ((self.cpu, allocation.cpu), (self.memory, allocation.memory),
+                            (self.bandwidth, allocation.bandwidth)):
+            for resource, amount in extra.items():
+                used[resource] -= amount
+                if abs(used[resource]) < EPSILON:
+                    used[resource] = 0.0
+        self.version += 1
+
+    def adopt(self, view):
+        """Publish a fully checked ledger replacement as one live transaction."""
+        for key in ('cpu', 'memory', 'bandwidth', 'active', 'reservations', 'paused_cpu'):
+            setattr(self, key, getattr(view, key))
+        self.version += 1
+
     def switch_is_active(self, node, trial=None):
         if self.graph.nodes[node]['tier'] == 'wan' and self.power_config['wan_always_on']:
             return True
@@ -210,8 +261,11 @@ class Substrate:
 
     def snapshot(self):
         p = self.power_config
+        standby = {h: sum(r['standby_cpu'].get(h, 0) for r in self.reservations.values())
+                   for h in self.servers}
         server_w = sum(p['server_idle_w'] + (p['server_peak_w'] - p['server_idle_w'])
-                       * self.cpu[n] / self.graph.nodes[n]['cpu'] if self.cpu[n] > EPSILON
+                       * max(0.0, self.cpu[n] - standby[n] - self.paused_cpu[n]) / self.graph.nodes[n]['cpu']
+                       if self.cpu[n] > EPSILON or self.memory[n] > EPSILON
                        else p['server_off_w'] for n in self.servers)
         switch_w = 0.0
         active_switches = 0
@@ -229,11 +283,16 @@ class Substrate:
         finite_wan = bool(wan_edges) and all(self.graph.edges[e]['capacity_mbps'] is not None for e in wan_edges)
         return {
             'active_requests': len(self.active),
-            'active_servers': sum(v > EPSILON for v in self.cpu.values()),
+            'active_servers': sum(self.cpu[h] > EPSILON or self.memory[h] > EPSILON for h in self.servers),
             'active_switches': active_switches,
             'cpu_utilization': sum(self.cpu.values()) / cpu_capacity,
             'memory_utilization': sum(self.memory.values()) / mem_capacity,
             'wan_bandwidth_mbps_hops': sum(self.bandwidth[e] for e in wan_edges),
             'wan_utilization': sum(self.bandwidth[e] for e in wan_edges) / wan_capacity if finite_wan else None,
             'server_power_w': server_w, 'network_power_w': switch_w, 'power_w': server_w + switch_w,
+            'active_migrations': len(self.reservations),
+            'migration_reserved_cpu': sum(standby.values()),
+            'migration_copy_cpu': sum(sum(r['copy_cpu'].values()) for r in self.reservations.values()),
+            'migration_reserved_memory_gb': sum(sum(r['allocation'].memory.values()) for r in self.reservations.values()),
+            'migration_bandwidth_mbps_hops': sum(sum(r['migration_bandwidth'].values()) for r in self.reservations.values()),
         }

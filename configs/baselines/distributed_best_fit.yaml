@@ -54,3 +54,21 @@ power:
   switch_port_w: 0.9
   switch_off_w: 0.0
   wan_always_on: true
+control_plane:
+  enabled: true
+  workers: 2
+  decision_timeout_ms: 1000.0
+  latency_mode: modeled
+  base_latency_ms: 1.0
+  validation_latency_ms: 0.1
+  backend_latency_ms:
+    exact: 2.0
+    sa: 5.0
+    qaoa_sim: 25.0
+    qa: 100.0
+  trace_ms: []
+migration:
+  enabled: true
+  interval_s: 300.0
+  objective:
+    migration_weight: 0.1

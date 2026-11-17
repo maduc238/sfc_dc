@@ -50,10 +50,24 @@ DEFAULTS = {
                'max_cost_per_run': 0.0, 'timeout_ms': 20000.0},
     },
     'control_plane': {
-        'enabled': False, 'workers': 1, 'decision_timeout_ms': 1000.0,
+        'enabled': True, 'workers': 2, 'decision_timeout_ms': 1000.0,
         'latency_mode': 'modeled', 'base_latency_ms': 1.0, 'validation_latency_ms': 0.1,
         'backend_latency_ms': {'exact': 2.0, 'sa': 5.0, 'qaoa_sim': 25.0, 'qa': 100.0},
         'trace_ms': [],
+    },
+    'migration': {
+        'enabled': True, 'interval_s': 300.0, 'cooldown_s': 600.0,
+        'budget_ms': 250.0, 'decision_latency_ms': 2.0, 'max_candidates': 64,
+        'bandwidth_mbps': 200.0, 'max_precopy_rounds': 10, 'timeout_s': 60.0,
+        'max_downtime_s': 0.1, 'downtime_budget_s': 1.0,
+        'setup_s': 0.2, 'restore_s': 0.04, 'route_update_s': 0.01, 'cleanup_s': 0.1,
+        'copy_cpu': 0.1, 'copy_buffer_mb': 16.0,
+        'profile': {'state_mb': [64.0, 256.0], 'dirty_rate_mbps': [1.0, 10.0]},
+        'objective': {'horizon_s': 600.0, 'energy_reference_j': 600000.0,
+                      'latency_reference_ms': 100.0, 'transfer_reference_mbit_hops': 10000.0,
+                      'downtime_reference_s': 1.0, 'route_reference_changes': 20.0,
+                      'energy_weight': 1.0, 'latency_weight': 1.0, 'migration_weight': 0.1,
+                      'minimum_improvement': 0.001},
     },
     'power': {'server_idle_w': 100.0, 'server_peak_w': 200.0, 'server_off_w': 0.0,
               'switch_idle_w': 39.0, 'switch_port_w': 0.9, 'switch_off_w': 0.0,
@@ -177,6 +191,7 @@ def validate_config(config):
     if p['switch_off_w'] > p['switch_idle_w']:
         raise ValueError('Switch power must satisfy off <= idle')
     _validate_hybrid(config)
+    _validate_migration(config)
     return config
 
 
@@ -250,6 +265,41 @@ def _validate_hybrid(config):
         _number(value, 'trace_ms')
     if control['latency_mode'] == 'trace' and len(control['trace_ms']) != config['workload']['num_requests']:
         raise ValueError('trace_ms requires one duration per offered request')
+
+
+def _validate_migration(config):
+    m = config['migration']
+    if not isinstance(m['enabled'], bool):
+        raise ValueError('migration.enabled must be a YAML boolean')
+    for key in ('interval_s', 'budget_ms', 'bandwidth_mbps', 'timeout_s', 'max_downtime_s',
+                'downtime_budget_s'):
+        _number(m[key], f'migration.{key}', positive=True)
+    for key in ('max_candidates', 'max_precopy_rounds'):
+        _number(m[key], f'migration.{key}', integer=True, positive=True)
+    for key in ('cooldown_s', 'decision_latency_ms', 'setup_s', 'restore_s', 'route_update_s',
+                'cleanup_s', 'copy_cpu', 'copy_buffer_mb'):
+        _number(m[key], f'migration.{key}')
+    for key, bounds in m['profile'].items():
+        if not isinstance(bounds, list) or len(bounds) != 2:
+            raise ValueError(f'migration.profile.{key} must be [minimum, maximum]')
+        for value in bounds:
+            _number(value, f'migration.profile.{key}')
+        if bounds[0] > bounds[1]:
+            raise ValueError(f'migration.profile.{key} bounds are reversed')
+    if m['profile']['state_mb'][1] == 0 and m['profile']['dirty_rate_mbps'][1] > 0:
+        raise ValueError('Zero-state profiles require zero dirty rate')
+    for key, value in m['objective'].items():
+        _number(value, f'migration.objective.{key}', positive='reference' in key or key == 'horizon_s')
+    if m['objective']['energy_weight'] + m['objective']['latency_weight'] <= 0:
+        raise ValueError('Migration requires a positive energy or latency weight')
+    if m['enabled']:
+        if not config['control_plane']['enabled'] or config['control_plane']['latency_mode'] == 'trace':
+            raise ValueError('Migration requires an enabled modeled/measured controller')
+        if config['solver']['allow_colocation']:
+            raise ValueError('Migration requires allow_colocation: false; each move stays within its source DC')
+        if m['restore_s'] + m['route_update_s'] > m['max_downtime_s']:
+            raise ValueError('Restore and route update exceed migration downtime limit')
+    return config
 
 
 def load_config(path):

@@ -1,6 +1,6 @@
 # Hướng dẫn chạy thuật toán Adaptive Hierarchical Hybrid SFC Embedding (AHQ-SFC)
 
-AHQ-SFC đã được tích hợp dưới `solver.name: ahq`. Bản hiện tại gồm decomposition, QUBO, exact enumeration, simulated annealing, QAOA statevector, policy chọn backend, controller có hàng đợi/deadline và adapter D-Wave tùy chọn. Giữ nguyên giao diện `python main.py --config <file.yaml>` và không cần cài package `virne`.
+AHQ-SFC đã được tích hợp dưới `solver.name: ahq`. Hệ thống mô phỏng hiện chạy trên CPU: decomposition, QUBO, exact enumeration, simulated annealing, QAOA statevector, policy chọn backend và controller có hàng đợi/deadline. QAOA dùng NumPy để mô phỏng thuật toán quantum trên CPU. Giữ nguyên giao diện `python main.py --config <file.yaml>` và không cần cài package `virne`.
 
 ## Chạy ngay
 
@@ -15,7 +15,7 @@ python -m unittest discover -s tests/distributed -v
 
 ## Bộ cấu hình so sánh
 
-Mỗi YAML trong `configs/hybrid` chứa cấu hình đầy đủ, không phụ thuộc inheritance.
+Mỗi YAML trong `configs/hybrid` là một cấu hình độc lập. Tất cả dùng cùng controller, migration và hệ số cost với các baseline truyền thống; mô hình hệ thống được mô tả trong [tài liệu mô phỏng](distributed-data-centers.md).
 
 | File | Cơ chế |
 | --- | --- |
@@ -30,6 +30,8 @@ Mỗi YAML trong `configs/hybrid` chứa cấu hình đầy đủ, không phụ 
 | `distributed_control_best_fit.yaml` | Best-Fit không reduction, cùng controller/workload |
 
 Hai preset QA ở trạng thái mặc định **không phải benchmark phần cứng quantum**. Preset static QA disabled có thể khác SA vì một lần thử disabled chiếm slot call và fallback dùng stream seed riêng.
+
+Để so sánh trong môi trường CPU, dùng HRE/Best-Fit, exact, SA, QAOA simulator và adaptive với `quantum_backend: qaoa_sim`. Giữ `hybrid.qa.enabled: false`. Hai preset QA disabled chỉ kiểm tra fallback, không cung cấp kết quả mô phỏng quantum annealing.
 
 Chạy nhiều seed và xuất bảng tổng hợp:
 
@@ -48,7 +50,7 @@ Thư mục output phải chưa tồn tại. Công cụ kiểm tra workload/contr
 5. Sinh QUBO, chọn backend, decode rồi route lại toàn bộ chain bằng validator chung.
 6. Chỉ thay incumbent khi có nghiệm khả thi tốt hơn theo objective thực. Khi không có incumbent, nghiệm khả thi tìm được có thể cứu request. Không mutate substrate trong quá trình search. Kết quả quantum lỗi/không có mẫu khả thi được thử SA trên cùng QUBO nếu còn ngân sách; luôn giữ incumbent làm fallback.
 
-V1 chỉ hỗ trợ `scope: single_dc` và `allow_colocation: false`; cấu hình trái với giả định bị từ chối. Không migration, không thay placement của request đang chạy. Candidate reduction và routing hữu hạn có thể loại mất nghiệm tốt hoặc khả thi.
+Admission AHQ-SFC chỉ hỗ trợ `scope: single_dc` và `allow_colocation: false`; cấu hình trái với giả định bị từ chối. `hybrid.optimize_existing` chỉ tối ưu incumbent chưa commit của request đang xử lý. Tái bố trí VNF của SFC đã nhận thuộc vòng vận hành chung, bật sẵn trong YAML. Candidate reduction và routing hữu hạn có thể loại mất nghiệm tốt hoặc khả thi.
 
 ## QUBO và objective thực
 
@@ -61,15 +63,19 @@ J = power_weight * incremental_server_and_network_power / power_reference_w
   + latency_weight * actual_chain_latency / latency_reference_ms
 ```
 
-Incremental network power đếm mỗi switch/port mới một lần trên hợp đường đi. Đây là công suất (W), không gọi nhầm là năng lượng. Tổng năng lượng của thí nghiệm vẫn tích phân theo thời gian sự kiện. Chưa có migration cost vì chưa có migration.
+Incremental network power đếm mỗi switch/port mới một lần trên hợp đường đi. Đây là công suất (W), không gọi nhầm là năng lượng. Tổng năng lượng của thí nghiệm vẫn tích phân theo thời gian sự kiện. Objective trên dùng cho admission; request mới chưa có vị trí cũ nên migration cost bằng 0. Scheduler migration có objective riêng để so giữ nguyên với chuyển vị trí, gồm năng lượng dự báo, latency và cost chuyển.
 
 `exact` duyệt assignment one-hot trong candidate pool, loại trùng host, rồi chấm qua routing policy. `neighborhood_search_complete` chỉ đúng nếu duyệt đủ và validate đủ. `neighborhood_optimal` còn yêu cầu tìm được nghiệm khả thi; chỉ tối ưu **trong neighborhood với routing policy cố định**, không phải optimum toàn mạng. Không có CP-SAT/MILP joint placement-routing trong phiên bản này.
 
-## Backend quantum và classical
+## Backend chạy trên CPU
 
 - **SA:** classical bit-flip Metropolis, seed riêng, lịch beta, bắt đầu một read từ seed placement và các read khác ngẫu nhiên. Mỗi read trả mẫu tốt nhất.
 - **QAOA simulator:** NumPy thực thi statevector của cost diagonal QUBO và mixer X, bắt đầu ở trạng thái |+>. Optimizer classical là pattern search có seed, dùng expectation chính xác; chỉ bước đo cuối lấy `shots`. Có tùy chọn bit-flip ở readout, không phải noise model đầy đủ của thiết bị. `max_variables` mặc định 16, hard cap 20 để giới hạn RAM. Metadata ghi logical width, layers, evaluations, shots và số ZZ term; physical qubits/transpiled depth là null vì không có QPU hoặc transpiler ở đường chạy này.
-- **QA:** adapter `DWaveSampler` + `EmbeddingComposite`, lazy import SDK, worker process riêng để giới hạn chờ SDK/network. Khi có response, ghi timing do SDK trả, physical qubits, max chain length và chain-break fraction nếu có.
+SA và QAOA simulator dùng chung QUBO nhưng thực thi hai thuật toán khác nhau. Đo wall time CPU, chất lượng placement và số lần đánh giá; không coi thời gian statevector là thời gian thực thi circuit trên QPU.
+
+## Adapter QPU ngoài phạm vi thí nghiệm CPU
+
+Repository còn adapter `DWaveSampler` + `EmbeddingComposite`, lazy import SDK, worker process riêng để giới hạn chờ SDK/network. Khi có response, ghi timing do SDK trả, physical qubits, max chain length và chain-break fraction nếu có. Adapter này chưa được xác thực bằng lần chạy QPU thật và không được bật trong thí nghiệm CPU.
 
 Để tự chạy QA thật, cài `requirements-quantum.txt`, cấu hình credential bằng cơ chế của D-Wave SDK (không ghi token vào YAML), bật `hybrid.qa.enabled`, đặt `max_calls_per_run` dương và budget chi phí phù hợp. Chọn static backend `qa` hoặc hiệu chỉnh rule policy để cho phép chọn QA. Cần tăng deadline/budget phù hợp với queue thực tế; 1000 ms trong preset là tham số demo, không cam kết QPU đáp ứng.
 
@@ -79,7 +85,7 @@ Các RNG có seed riêng để không thay đổi offered workload. Tuy nhiên w
 
 ## Policy thích ứng và model offline
 
-`policy.name: rule` ưu tiên exact nếu số assignment và thời gian dự báo vừa ngân sách; nếu không, chỉ chọn quantum khi backend khả dụng, expected gain vượt ngưỡng và expected time vừa ngân sách. Mặc định `quantum_expected_gain: 0` vì chưa có calibration. Các con số gain/time cấu hình là giả định, không phải kết quả đo tự động. Khi chưa có cơ sở gọi quantum, chọn SA. Có thể đặt `optimize_existing: false` để nhận luôn incumbent khả thi.
+`policy.name: rule` ưu tiên exact nếu số assignment và thời gian dự báo vừa ngân sách; nếu không, chỉ chọn QAOA simulator khi backend khả dụng, expected gain vượt ngưỡng và expected time vừa ngân sách CPU. Thí nghiệm CPU giữ `quantum_backend: qaoa_sim`. Mặc định `quantum_expected_gain: 0` vì chưa có calibration. Các con số gain/time cấu hình là giả định, không phải kết quả đo tự động. Khi chưa có calibration cho QAOA, chọn SA. Đặt `optimize_existing: false` để nhận luôn incumbent khả thi của request mới.
 
 `policy.name: learned` dùng mô hình action-value tuyến tính regularized, fit offline từ log rồi giữ cố định khi đánh giá. Đây là thành phần exploitation của contextual bandit; chưa có online exploration hoặc học chọn kích thước neighborhood. Feature gồm incumbent, số assignment, candidate overlap/retention, utilization, BW headroom và SLA slack. Không đọc future arrival hoặc lifetime tương lai.
 
@@ -131,4 +137,6 @@ Ngoài các file cũ, mỗi làn chạy có:
 
 Kiểm thử local bao gồm QUBO exhaustive, statevector QAOA đối chiếu nghiệm giải tích, seed, rescue, incumbent preservation, fallback, CPU/RAM/BW/SLA, queue, deadline, stale snapshot, tích phân năng lượng và hợp đồng SDK D-Wave bằng test double. Chưa xác thực trên QPU thật và chưa chứng minh quantum speedup.
 
-Migration, quantum cross-DC chain, CP-SAT joint optimum, online bandit exploration và model noise thiết bị đầy đủ là các mở rộng tiếp theo. Các baseline cross-DC classical cũ vẫn dùng được riêng. Xem note thiết kế[`adaptive-hybrid-quantum-sfc.md`](adaptive-hybrid-quantum-sfc.md) để biết cơ sở lựa chọn.
+HRE và AHQ-SFC dùng cùng scheduler migration classical, cùng overhead và cost. QAOA chưa giải reconfiguration. Chi tiết state transfer, reservation, downtime và kết quả nằm trong [mô hình hệ thống](distributed-data-centers.md).
+
+AHQ-SFC cross-DC chain, CP-SAT joint optimum, online bandit exploration và model noise thiết bị đầy đủ chưa được triển khai. Các baseline cross-DC classical cũ vẫn dùng được riêng. Xem [note thiết kế AHQ-SFC](adaptive-hybrid-quantum-sfc.md) để biết cơ sở lựa chọn.

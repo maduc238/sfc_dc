@@ -10,6 +10,7 @@ import heapq
 import time
 
 from virne.distributed.hybrid.budget import Budget
+from virne.distributed.migration import MigrationManager, generate_profiles
 from virne.distributed.validation import EmbeddingValidator
 
 
@@ -20,11 +21,17 @@ def execute_events(config, substrate, solver, requests):
     # Common horizon includes every offered request's maximum admission delay.
     horizon = max(r.arrival + timeout_s + r.lifetime for r in requests)
     lookup = {r.id: r for r in requests}
-    # departure < completion < arrival < waiting deadline at the same instant.
-    events = [(r.arrival, 2, r.id) for r in requests]
+    # Departure, migration phase, admission completion, arrival, queue deadline,
+    # migration decision, periodic consolidation (in that order at equal times).
+    events = [(r.arrival, 3, r.id) for r in requests]
     heapq.heapify(events)
     waiting, pending, finished = deque(), {}, set()
     records, allocations, snapshots, calls, decisions = [], [], [], [], []
+    migration_decisions, current_intervals = [], {}
+    profiles = generate_profiles(config, requests)
+    migration = MigrationManager(config, substrate, profiles)
+    if config['migration']['enabled'] and config['migration']['interval_s'] < horizon:
+        heapq.heappush(events, (config['migration']['interval_s'], 6, -1))
     counters, integrals = Counter(), Counter()
     audit = EmbeddingValidator(config)
     previous = 0.0
@@ -66,9 +73,12 @@ def execute_events(config, substrate, solver, requests):
             counters['accepted_vnfs'] += len(request.vnfs)
             dcs = sorted({substrate.graph.nodes[h]['dc'] for h in proposal.placement.values()})
             counters['cross_dc_requests'] += int(len(dcs) > 1)
-            allocations.append({'request_id': request.id, 'placement': proposal.placement,
+            interval = {'request_id': request.id, 'placement': proposal.placement,
                                 'paths': proposal.paths, 'latency_ms': proposal.latency_ms,
-                                'admission_s': now, 'departure_s': now + request.lifetime})
+                                'admission_s': now, 'departure_s': now + request.lifetime,
+                                'start_s': now, 'end_s': now + request.lifetime, 'generation': 0}
+            allocations.append(interval)
+            current_intervals[request.id] = interval
             heapq.heappush(events, (now + request.lifetime, 0, request.id))
             reason = None
         else:
@@ -136,7 +146,7 @@ def execute_events(config, substrate, solver, requests):
         complete = now + duration_ms / 1000
         job['misses_deadline'] = complete > request.arrival + timeout_s + 1e-9
         pending[request.id] = job
-        heapq.heappush(events, (min(complete, request.arrival + timeout_s), 1, request.id))
+        heapq.heappush(events, (min(complete, request.arrival + timeout_s), 2, request.id))
         return 'decision_started'
 
     def dispatch(now):
@@ -145,39 +155,110 @@ def execute_events(config, substrate, solver, requests):
             if request_id not in finished:
                 start_job(lookup[request_id], now)
 
-    snapshots.append({'time_s': 0.0, 'event': 'start', 'request_id': -1, **snapshot()})
+    def plan_migration(now):
+        # Admission has priority; one migration decision occupies one shared worker.
+        if migration.current is not None or -1 in pending or len(pending) >= control['workers'] or waiting:
+            counters['migration_rounds_busy'] += 1
+            return
+        if not substrate.active:
+            return
+        budget = Budget(config['migration']['budget_ms'])
+        plan = migration.planner.choose(substrate, lookup, now, migration.last_completed,
+                                        migration.downtime, budget)
+        stats = dict(migration.planner.last_search)
+        record = {'start_s': now, 'complete_s': None, 'selected_request_id': plan.request.id if plan else None,
+                  'selected_vnf_index': plan.vnf_index if plan else None, **stats,
+                  'started': False, 'reason': ''}
+        migration_decisions.append(record)
+        duration_ms = (stats['wall_time_ms'] if control['latency_mode'] == 'measured'
+                       else config['migration']['decision_latency_ms']) + control['validation_latency_ms']
+        pending[-1] = {'plan': plan, 'record': record}
+        heapq.heappush(events, (min(horizon, now + duration_ms / 1000.0), 5, -1))
+
+    snapshots.append({'time_s': 0.0, 'event': 'start', 'request_id': -1, 'migration_id': -1, **snapshot()})
     while events:
         now, event_type, request_id = heapq.heappop(events)
+        if event_type == 1 and (migration.current is None or migration.current['key'] != request_id):
+            continue  # A cancelled phase can be past the common simulation horizon.
         integrate(now)
-        request = lookup[request_id]
+        migration_id = -1
         if event_type == 0:
+            migration.cancel_departure(request_id, now)
+            current_intervals[request_id]['end_s'] = now
             substrate.release(request_id)
             event = 'departure'
         elif event_type == 1:
+            migration_id = request_id
+            request_id = migration.current['plan'].request.id
+            phase = migration.current['phase']
+            changed = migration.advance(migration_id, now)
+            event = {'preparing': 'migration_prepared', 'copying': 'migration_stopped',
+                     'stopping': 'migration_cutover', 'cleanup': 'migration_completed'}[phase]
+            if changed is not None:
+                old_interval = current_intervals[request_id]
+                old_interval['end_s'] = now
+                interval = {**old_interval, 'placement': changed.new.placement, 'paths': changed.new.paths,
+                            'latency_ms': changed.new.latency_ms, 'start_s': now,
+                            'end_s': old_interval['departure_s'], 'generation': old_interval['generation'] + 1}
+                allocations.append(interval)
+                current_intervals[request_id] = interval
+            if (next_phase := migration.next_event()) is not None:
+                heapq.heappush(events, (next_phase[0], 1, next_phase[1]))
+        elif event_type == 2:
+            request = lookup[request_id]
             job = pending.pop(request_id)
             reason = 'deadline' if job['misses_deadline'] else job['reason']
             finish(request, now, job['proposal'], reason, job)
             event = 'decision_complete'
-        elif event_type == 2:
+        elif event_type == 3:
+            request = lookup[request_id]
             if enabled:
                 waiting.append(request_id)
-                heapq.heappush(events, (request.arrival + timeout_s, 3, request_id))
+                heapq.heappush(events, (request.arrival + timeout_s, 4, request_id))
                 event = 'arrival_queued'
             else:
                 event = start_job(request, now)
-        else:
+        elif event_type == 4:
+            request = lookup[request_id]
             if request_id in finished or request_id in pending:
                 continue
             finish(request, now, reason='deadline')
             event = 'queue_deadline'
+        elif event_type == 5:
+            job = pending.pop(-1)
+            record = job['record']
+            record['complete_s'] = now
+            if job['plan'] is not None:
+                started, reason = migration.start(job['plan'], now)
+                record.update(started=started, reason=reason or '')
+                if started:
+                    next_phase = migration.next_event()
+                    heapq.heappush(events, (next_phase[0], 1, next_phase[1]))
+            else:
+                record['reason'] = 'no_improving_plan'
+            event = 'migration_decision_complete'
+        else:
+            if now + config['migration']['interval_s'] < horizon:
+                heapq.heappush(events, (now + config['migration']['interval_s'], 6, -1))
+            plan_migration(now)
+            event = 'migration_round'
         if enabled:
             dispatch(now)
         state = snapshot()
         peak_active_servers = max(peak_active_servers, state['active_servers'])
-        snapshots.append({'time_s': now, 'event': event, 'request_id': request_id, **state})
+        snapshots.append({'time_s': now, 'event': event, 'request_id': request_id,
+                          'migration_id': migration_id, **state})
     integrate(horizon)
-    snapshots.append({'time_s': horizon, 'event': 'end', 'request_id': -1, **snapshot()})
+    snapshots.append({'time_s': horizon, 'event': 'end', 'request_id': -1, 'migration_id': -1, **snapshot()})
+    for record in records:
+        rid = record['request_id']
+        record.update(migration_count=sum(m['request_id'] == rid and m['committed'] for m in migration.records),
+                      downtime_s=migration.downtime[rid],
+                      availability=1.0 - migration.downtime[rid] / record['lifetime_s'] if record['accepted'] else None)
     return {'records': sorted(records, key=lambda r: r['request_id']), 'events': snapshots,
             'allocations': allocations, 'backend_calls': calls, 'decisions': decisions,
             'counters': counters, 'integrals': integrals, 'horizon': horizon,
-            'peak_active_servers': peak_active_servers}
+            'peak_active_servers': peak_active_servers, 'migrations': migration.records,
+            'migration_decisions': migration_decisions, 'outages': migration.outages,
+            'migration_profiles': [{'request_id': rid, 'vnf_index': v, 'state_mb': p.state_mb,
+                                    'dirty_rate_mbps': p.dirty_rate_mbps} for (rid, v), p in profiles.items()]}

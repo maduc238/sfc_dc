@@ -1,4 +1,4 @@
-# AHQ-SFC comparison preset; 100 requests, seed 42, 64 servers, identical controller budgets.
+# AHQ-SFC comparison preset; 200 requests, seed 42, 64 servers, identical controller budgets.
 # Controller latencies are a declared MODEL, not measured QPU performance.
 schema_version: 1
 simulation: distributed_dc
@@ -52,7 +52,7 @@ topology:
     wan_node: 3
     num_servers: 16
 workload:
-  num_requests: 100
+  num_requests: 200
   arrival_rate_per_hour: 40.0
   mean_lifetime_hours: 2.0
   ingress_nodes:
@@ -152,3 +152,8 @@ power:
   switch_port_w: 0.9
   switch_off_w: 0.0
   wan_always_on: true
+migration:
+  enabled: true
+  interval_s: 300.0
+  objective:
+    migration_weight: 0.1

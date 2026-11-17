@@ -1,17 +1,17 @@
 # Thuật toán: Adaptive Hierarchical Hybrid SFC Embedding
 
-Hiện đã có implementation về AHQ-SFC, xem [hướng dẫn chạy](ahq-sfc-running.md). Adapter D-Wave đã có nhưng chưa xác thực trên QPU thật. Các mục dưới đây giữ cơ sở thiết kế như migration, cross-DC quantum, CP-SAT joint model và online bandit exploration.
+AHQ-SFC hiện chạy trên CPU, xem [hướng dẫn chạy](ahq-sfc-running.md). Thành phần quantum trong thí nghiệm là QAOA statevector bằng NumPy. Adapter D-Wave có trong code nhưng nằm ngoài phạm vi thí nghiệm CPU. Mọi baseline dùng cùng controller, cơ chế migration và cost vận hành theo [mô hình hệ thống](distributed-data-centers.md).
 
-Chọn orchestration thích ứng làm kiến trúc chính và dùng hierarchical decomposition để tạo subproblem QUBO có ngân sách. Quantum là một backend tùy chọn trong quá trình improvement; placement, routing và kiểm tra ràng buộc vẫn có mode chạy classical.
+Chọn orchestration thích ứng làm kiến trúc chính và dùng hierarchical decomposition để tạo subproblem QUBO có ngân sách. Orchestrator chọn exact enumeration, simulated annealing hoặc QAOA simulator. Placement, routing, kiểm tra ràng buộc và mô phỏng QAOA đều thực thi trên CPU.
 
 ## Phạm vi hệ thống
 
 - Online admission và placement cho SFC mới trên nhiều DC; mỗi SFC ở một DC.
 - CPU, RAM, bandwidth và latency SLO là ràng buộc cứng khi commit.
 - Giữ `allow_colocation: false` như các preset hiện tại. Các SFC khác nhau vẫn chia sẻ server nếu còn tài nguyên.
-- Cố định các request đang chạy; chỉ thay đổi quyết định tentative của request mới.
-- Chưa đưa migration cost vào hàm mục tiêu (simulator hiện chưa có copy state, downtime, băng thông migration, destination reservation và rollback migration).
-- Chưa kết hợp cross-DC placement với quantum trong lần triển khai đầu. Có thể mở rộng sau khi đã đánh giá riêng độ mất chất lượng do chọn DC/candidate.
+- Solver AHQ-SFC xử lý quyết định tentative của request mới. Vòng vận hành chung định kỳ xét lại các SFC đang chạy; migration bật mặc định trong cấu hình hệ thống.
+- Objective migration đã tính transfer Mbit-hop, downtime và thay đổi route. Pre-copy, reservation hai đầu và năng lượng theo sự kiện đã được triển khai.
+- AHQ-SFC đặt mỗi SFC trong một DC. Migration hiện chuyển một VNF mỗi plan trong cùng DC; chưa chuyển toàn SFC giữa hai DC.
 
 Mục tiêu xử lý một request: tìm nghiệm khả thi trong deadline, sau đó chọn nghiệm có chi phí thấp hơn. Mục tiêu đánh giá toàn hệ thống: acceptance, SLA, năng lượng và chi phí điều phối. Nếu chỉ tối thiểu hóa năng lượng mà không tính admission có thể khiến hệ thống chọn cách từ chối mọi request, nên không dùng mục tiêu đó một mình.
 
@@ -21,7 +21,7 @@ Mục tiêu xử lý một request: tìm nghiệm khả thi trong deadline, sau 
 2. Xếp hạng DC theo proximity, tài nguyên phù hợp và khả năng tiếp nhận ingress. Thử tối đa 2 DC ứng viên ban đầu, không khóa cứng vào duy nhất DC gần nhất.
 3. Chọn tập VNF cần sửa U: VNF chưa đặt được, hai đầu đoạn route thất bại hoặc VNF liên quan đến server mới cần bật. Ưu tiên một đoạn liên tiếp của chain.
 4. Cố định quyết định ngoài U. Tạo candidate server cho mỗi VNF trong U bằng CPU/RAM residual, ingress/neighbor reachability, locality và incremental power. Bao gồm host của incumbent nếu có để không loại bỏ phương án đã khả thi.
-5. Orchestrator chọn: dùng incumbent, exact search, simulated annealing, hoặc backend quantum được cấu hình. Quyết định dựa trên đặc trưng instance, ngân sách còn lại và lợi ích đạt được qua quan sát trên tập huấn luyện/validation.
+5. Orchestrator chọn: dùng incumbent, exact search, simulated annealing hoặc QAOA simulator. Quyết định dựa trên đặc trưng instance, ngân sách CPU còn lại và lợi ích đạt được qua quan sát trên tập huấn luyện/validation.
 6. Decode nhiều mẫu nếu backend trả về nhiều nghiệm; bỏ mẫu vi phạm placement. Với từng placement, dựng Allocation mới và route lại **toàn bộ request**. Không tái dùng các reservations từ một lần thử thất bại.
 7. Kiểm tra CPU/RAM/BW/order/SLA, so sánh chi phí thực của các nghiệm khả thi. Commit tốt nhất; timeout hoặc mẫu không khả thi thì dùng incumbent/fallback. Không có incumbent khả thi sau hết ngân sách thì từ chối request.
 
@@ -34,8 +34,8 @@ Các giá trị dưới đây là cấu hình khởi đầu cho thực nghiệm,
 - Tối đa 2 DC ứng viên; giải từng DC riêng.
 - Mặc định |U|=4, tối đa 3 server/VNF: tối đa 12 biến placement.
 - Sweep |U| trong {2, 4, 6, 8}, candidate trong {2, 3, 4}; giới hạn phụ thuộc backend.
-- Thử QAOA simulator bắt đầu ở 8–16 biến, p=1–2; ghi cả depth sau transpilation, số cổng hai qubit, shots và số lần optimizer gọi circuit.
-- Quantum annealing lưu biến logical, qubit physical sau embedding, chain length/breaks, reads và thời gian lập trình/chạy QPU.
+- QAOA simulator bắt đầu ở 8–16 biến, p=1–2; ghi số qubit logic mô phỏng, số ZZ term, shots, số lần đánh giá expectation và wall time CPU.
+- Đường chạy này không có transpilation hoặc QPU. Các trường physical qubits và transpiled depth giữ null; không quy đổi số biến QUBO thành tài nguyên phần cứng đã dùng.
 
 ## QUBO placement
 
@@ -68,15 +68,17 @@ J=\alpha\frac{\Delta P_{\mathrm{server+network}}}{P_{ref}}
 +\beta\frac{D_{SFC}}{D_{ref}}.
 \]
 
-Chọn P_ref và D_ref cố định trong một benchmark; nếu SLA bị tắt vẫn cần D_ref. Delta P là công suất tăng thêm. Năng lượng thực vẫn đo bằng tích phân công suất của event simulator. Migration để giai đoạn sau và lúc đó mới thêm gamma.
+Chọn P_ref và D_ref cố định trong một benchmark; nếu SLA bị tắt vẫn cần D_ref. Delta P là công suất tăng thêm. Năng lượng thực vẫn đo bằng tích phân công suất của event simulator.
+
+Khi tái bố trí SFC đang chạy, hệ thống so năng lượng dự báo trong cửa sổ H, latency sau chuyển và migration cost chuẩn hóa. Cost gồm transfer Mbit-hop, downtime và thay đổi route; năng lượng hai đầu được tính qua công suất sự kiện. Đây là chi phí vận hành chung của mọi baseline, xem [mô hình hệ thống](distributed-data-centers.md). Với admission, request chưa có vị trí cũ nên migration cost bằng 0.
 
 ## Backend và chính sách điều phối
 
-**Triển khai đầu tiên:** reducer + QUBO builder + exact enumeration + simulated annealing classical + validator.
+**Đã triển khai:** reducer, QUBO builder, exact enumeration, simulated annealing, QAOA statevector và validator.
 
-**Quantum backend ưu tiên:** quantum annealing qua adapter trực tiếp tới QPU, vì dùng cùng formulation BQM. Chỉ bật khi có backend và ngân sách được cấu hình.
+**Backend quantum trong thí nghiệm CPU:** QAOA statevector bằng NumPy, dùng cùng placement QUBO. So sánh chất lượng nghiệm và thời gian simulator với exact/SA trong cùng ngân sách.
 
-**QAOA:** adapter thực nghiệm thứ hai, trước hết simulator ideal/noisy trên instance nhỏ, sau đó hardware nếu có. Đây là phép so sánh khác cơ chế backend, không phải yêu cầu để hoàn thành kiến trúc đầu tiên.
+**Adapter D-Wave:** giữ như một tích hợp riêng trong repository, không bật trong các thí nghiệm này. SA là annealing classical, không gán nhãn quantum annealing cho kết quả SA.
 
 Chính sách v1 là rule-based có calibration:
 
@@ -84,8 +86,8 @@ Chính sách v1 là rule-based có calibration:
 | --- | --- |
 | Có incumbent đủ tốt, deadline còn ít | Dùng incumbent |
 | Số assignment sau reduction nhỏ, exact được dự báo hoàn tất kịp | Exact |
-| Cần repair, exact có thể quá ngân sách, chưa có lợi ích QPU đã đo | Classical SA/local search |
-| Backend QPU sẵn sàng, lợi ích dự báo vượt chi phí và đáp ứng deadline | Quantum sampler |
+| Cần repair, exact được dự báo vượt ngân sách, chưa có calibration cho QAOA | Classical SA |
+| QAOA simulator khả dụng, lợi ích dự báo đáp ứng ngưỡng và còn đủ ngân sách CPU | QAOA simulator |
 | Backend lỗi, timeout, trạng thái cũ hoặc mọi mẫu không khả thi | Fallback/giữ incumbent |
 
 Sau khi có dữ liệu, dùng cost-sensitive contextual bandit để chọn backend, kích thước neighborhood và sampling budget. Action “không gọi thêm solver” luôn tồn tại. Huấn luyện offline và tách topology/seed/load validation-test; so sánh với policy rule-based.
@@ -94,9 +96,9 @@ Sau khi có dữ liệu, dùng cost-sensitive contextual bandit để chọn bac
 
 Phân biệt data-plane latency SLA với control-plane admission deadline.
 
-T_end_to_end = preprocessing + formulation + embedding/transpilation + queue + backend_execution + decode/repair + routing_validation.
+T_end_to_end = queue + preprocessing + formulation + backend_execution + decode/repair + routing_validation.
 
-Không chỉ báo anneal time hoặc circuit execution. Chi phí và số QPU call được lưu riêng; reward nếu cần phải chuẩn hóa trước khi cộng các đại lượng.
+Đánh giá wall time toàn bộ quyết định trên CPU. Với QAOA, thời gian gồm dựng statevector, tối ưu tham số, sampling và validation. Chi phí QPU và số lần gọi QPU bằng 0 trong thí nghiệm CPU. Reward phải được chuẩn hóa trước khi cộng thời gian với cải thiện objective.
 
 Đường chạy cũ mặc định solve tại arrival. Implementation mới có tùy chọn `control_plane.enabled` với worker queue và event decision_complete; xem hướng dẫn chạy để phân biệt modeled/measured/trace latency và giới hạn mô hình concurrency.
 
@@ -113,14 +115,14 @@ Không chỉ báo anneal time hoặc circuit execution. Chi phí và số QPU ca
 
 1. HRE, FFD, Best-Fit hiện tại, không candidate reduction.
 2. Cùng decomposition + exact/SA classical, cùng validator.
-3. Static hybrid: luôn gọi quantum khi instance vừa ngân sách, cùng sampler.
+3. Static hybrid: luôn thử QAOA simulator khi instance vừa ngân sách, cùng sampler.
 4. Adaptive hybrid: lựa chọn backend theo tình trạng.
-5. Ablation thay quantum bằng SA/exact nhưng giữ reducer, policy features và ngân sách tương ứng; đo cả trường hợp tắt repair để tách đóng góp classical.
+5. Ablation thay QAOA simulator bằng SA/exact nhưng giữ reducer, policy features và ngân sách tương ứng; đo cả trường hợp tắt repair để tách đóng góp classical.
 6. Oracle chọn backend tốt nhất sau khi chạy mọi backend, chỉ làm upper reference offline và tuyệt đối không dùng như chính sách online.
 
-Hai chế độ benchmark: (a) cùng wall-clock deadline/controller workers; (b) quality versus tổng chi phí CPU/QPU.
+Hai chế độ benchmark: (a) cùng wall-clock deadline/controller workers; (b) chất lượng nghiệm theo tổng thời gian CPU.
 
-Đo acceptance và request admitted trước deadline; violation rate sau validation; energy/server/network; data-plane latency; p50/p95/p99 admission delay; số call và tổng QPU/CPU time; chi phí; feasible sample rate trước/sau repair; tỷ lệ rescue request, chất lượng incumbent cải thiện; qubit/coupler/depth; candidate pruning loss.
+Đo acceptance và request admitted trước deadline; violation rate sau validation; energy/server/network; data-plane latency; p50/p95/p99 admission delay; số backend call và wall time CPU; feasible sample rate trước/sau repair; tỷ lệ rescue request; chất lượng incumbent cải thiện; số qubit logic mô phỏng, layers, ZZ term; candidate pruning loss. Log migration bổ sung transfer, downtime, lý do loại và lịch sử placement.
 
 Giả thuyết đóng góp: adaptive policy giảm các lần gọi backend đắt tiền so với static hybrid mà vẫn giữ chất lượng, và decomposition tạo trade-off chất lượng/ chi phí có thể kiểm soát.
 
@@ -131,11 +133,11 @@ Các module dưới đây đã được triển khai; chi tiết hành vi thực
 - `virne/distributed/hybrid/candidates.py`: DC ranking, candidate reduction, neighborhood.
 - `virne/distributed/hybrid/qubo.py`: BQM, coefficient normalization, decode và kiểm tra.
 - `virne/distributed/hybrid/backends.py`: protocol cho exact/SA/QA/QAOA.
-- `virne/distributed/hybrid/policy.py`: rule-based policy rồi contextual bandit.
+- `virne/distributed/hybrid/policy.py`: rule-based policy và model action-value fit offline; chưa có online exploration.
 - `virne/distributed/hybrid/solver.py`: giữ cùng hợp đồng solve → Allocation/reason.
 - Refactor validator/routing dùng chung từ HeuristicSolver, giữ nguyên semantics của các baseline cũ. Substrate.commit/release tiếp tục quản lý trạng thái thật.
 - `config.py`: thêm schema hybrid strict, backend mặc định classical, budget rõ.
-- `runner.py`: log từng lần gọi backend và event decision_complete ở giai đoạn 2.
+- `runner.py`: log từng lần gọi backend, quyết định và kết quả event `decision_complete`.
 
 Các YAML đã có trong `configs/hybrid/` (remote QA mặc định disabled):
 `distributed_ahq_adaptive.yaml`, `distributed_hybrid_exact.yaml`, `distributed_hybrid_sa.yaml`,
@@ -144,7 +146,7 @@ Các YAML đã có trong `configs/hybrid/` (remote QA mặc định disabled):
 
 Có thêm `distributed_hybrid_learned.yaml` với model offline minh họa. Backend QA chưa chạy phần cứng; QAOA hiện dùng statevector NumPy, không chạy QPU.
 
-Thứ tự triển khai: corre  ctness + classical controls → budgeted event orchestration → quantum backend và ablations → policy học được → migration/cross-DC nếu cần. Không cần chứng minh quantum speedup để đánh giá một kiến trúc điều phối, nhưng không thể tuyên bố thành phần quantum hữu ích nếu chưa vượt classical replacement.
+Controller, reservation và migration events đã được tích hợp vào vòng vận hành của các baseline. QUBO reconfiguration và chuyển toàn SFC liên DC chưa được triển khai. Thí nghiệm CPU xác định chất lượng nghiệm và chi phí chạy thuật toán; kết quả đó không chứng minh quantum speedup.
 
 ## References
 

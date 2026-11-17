@@ -120,7 +120,9 @@ python main.py --config configs/hybrid/distributed_ahq_adaptive.yaml
 python main.py --config configs/hybrid/distributed_hybrid_qaoa_sim.yaml
 ```
 
-The nine standalone presets in `configs/hybrid/` share offered traffic and controller settings. Remote QPU calls are disabled by default. See the [AHQ-SFC run and evaluation guide](docs/ahq-sfc-running.md) for backend selection, matched-seed benchmarking, offline policy fitting, quantum labeling and limits.
+The nine standalone presets in `configs/hybrid/` share offered traffic and controller settings. Experiments run on CPU; QAOA uses a local NumPy statevector simulator. Remote QPU calls are disabled by default. See the [AHQ-SFC run and evaluation guide](docs/ahq-sfc-running.md) for backend selection, matched-seed benchmarking, offline policy fitting, quantum labeling and limits.
+
+All baseline and hybrid presets include controller timing and periodic single-VNF migration within the source DC. State transfer, downtime, reservations and route changes are part of the system cost, with the same migration settings across solvers. The [simulation guide](docs/distributed-data-centers.md) describes the model, parameters and output.
 
 ### Existing Virne Experiments
 
