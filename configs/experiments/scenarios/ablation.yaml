@@ -1,0 +1,8 @@
+schema_version: 1
+simulation: distributed_scenario
+study: ../distributed_study.yaml
+name: ablation
+stage: diagnostic
+group: ablation
+rhos: [0.9, 1.2]
+references: [pace_sfc, pace_no_bound, pace_fixed]

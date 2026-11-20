@@ -2,6 +2,8 @@
 
 Chạy mã nguồn trực tiếp từ repository bằng `main.py --config <file.yaml>`. Mô-đun `virne.distributed` bổ sung bài toán DC phân cấp vào repository Virne; nó có vòng lặp sự kiện và solver riêng vì mô hình VNE cũ không phân biệt router, switch và server.
 
+Bộ đánh giá PACE-SFC chạy từ `bash run.sh --config configs/experiments/distributed_study.yaml`. Sáu kịch bản dùng cùng kiến trúc 8 DC và 512 server. [Kịch bản, thuật toán và cách tổng hợp kết quả](pace-sfc.md).
+
 AHQ-SFC và bộ cấu hình hybrid được mô tả trong [hướng dẫn AHQ-SFC](ahq-sfc-running.md). Mọi cấu hình baseline và hybrid đều có controller delay và migration với cùng tham số hệ thống.
 
 Các thí nghiệm chạy trên CPU; QAOA trong AHQ-SFC là mô phỏng statevector bằng NumPy.

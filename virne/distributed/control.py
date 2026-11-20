@@ -9,6 +9,8 @@ from collections import Counter, deque
 import heapq
 import time
 
+from virne.distributed.config import HYBRID_SOLVERS
+
 from virne.distributed.hybrid.budget import Budget
 from virne.distributed.migration import MigrationManager, generate_profiles
 from virne.distributed.validation import EmbeddingValidator
@@ -19,13 +21,15 @@ def execute_events(config, substrate, solver, requests):
     enabled = control['enabled']
     timeout_s = control['decision_timeout_ms'] / 1000 if enabled else 0.0
     # Common horizon includes every offered request's maximum admission delay.
-    horizon = max(r.arrival + timeout_s + r.lifetime for r in requests)
+    offered_end = (config['workload']['duration_hours'] or 0.0) * 3600
+    horizon = max([offered_end] + [r.arrival + timeout_s + r.lifetime for r in requests])
     lookup = {r.id: r for r in requests}
     # Departure, migration phase, admission completion, arrival, queue deadline,
     # migration decision, periodic consolidation (in that order at equal times).
     events = [(r.arrival, 3, r.id) for r in requests]
     heapq.heapify(events)
     waiting, pending, finished = deque(), {}, set()
+    arrival_times = deque(maxlen=17) if enabled and getattr(solver, 'uses_arrival_rate', False) else None
     records, allocations, snapshots, calls, decisions = [], [], [], [], []
     migration_decisions, current_intervals = [], {}
     profiles = generate_profiles(config, requests)
@@ -97,6 +101,7 @@ def execute_events(config, substrate, solver, requests):
             'queue_delay_ms': (start - request.arrival) * 1000, 'admission_delay_ms': delay_ms,
             'controller_service_ms': (now - start) * 1000,
             'snapshot_version': job['version'] if job else substrate.version,
+            'solver_started': job is not None,
             'commit_version': substrate.version, 'fallback_used': fallback_used,
             'backend_calls': len(job['calls']) if job else 0,
         })
@@ -105,6 +110,8 @@ def execute_events(config, substrate, solver, requests):
             decision.update(request_id=request.id, admitted=accepted, final_reason=reason,
                             admission_delay_ms=delay_ms, fallback_used=fallback_used)
             decisions.append(decision)
+            if hasattr(solver, 'observe_completion'):
+                solver.observe_completion(decision)
             for call in job['calls']:
                 call['admitted'] = accepted
                 call['final_reason'] = reason
@@ -119,11 +126,18 @@ def execute_events(config, substrate, solver, requests):
         if enabled and remaining <= 1e-9:
             finish(request, now, reason='deadline')
             return None
-        milliseconds = config['hybrid']['budget_ms'] if config['solver']['name'] == 'ahq' else remaining
+        milliseconds = config['hybrid']['budget_ms'] if config['solver']['name'] in HYBRID_SOLVERS else remaining
         if enabled and milliseconds is not None:
             milliseconds = min(milliseconds, remaining)
         budget = Budget(milliseconds) if milliseconds is not None else None
         wall_start = time.perf_counter()
+        if hasattr(solver, 'decision_context'):
+            solver.decision_context = {'queued_requests': sum(i not in finished for i in waiting),
+                                       'workers': control['workers'], 'remaining_ms': remaining,
+                                       'snapshot_version': substrate.version}
+            if arrival_times is not None and len(arrival_times) >= 5:
+                solver.decision_context['mean_interarrival_ms'] = (
+                    1000 * (arrival_times[-1] - arrival_times[0]) / (len(arrival_times) - 1))
         try:
             allocation, reason = solver.solve(substrate, request, budget=budget)
         except TimeoutError:
@@ -133,6 +147,10 @@ def execute_events(config, substrate, solver, requests):
                'calls': list(getattr(solver, 'last_calls', [])),
                'decision': dict(getattr(solver, 'last_decision', {})),
                'fallbacks': list(getattr(solver, 'fallback_allocations', [])), 'version': substrate.version}
+        if config['output']['detail'] in ('compact', 'summary'):
+            # Drop per-shot/QUBO payloads before accumulating a long run in memory.
+            job['calls'] = [{k: v for k, v in call.items() if k not in ('qubo', 'sample_histogram')}
+                            for call in job['calls']]
         if not enabled:
             return finish(request, now, allocation, reason, job)
         if control['latency_mode'] == 'trace':
@@ -212,6 +230,8 @@ def execute_events(config, substrate, solver, requests):
             event = 'decision_complete'
         elif event_type == 3:
             request = lookup[request_id]
+            if arrival_times is not None:
+                arrival_times.append(now)
             if enabled:
                 waiting.append(request_id)
                 heapq.heappush(events, (request.arrival + timeout_s, 4, request_id))

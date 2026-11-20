@@ -1,8 +1,11 @@
 """Shared routing and full feasibility validation for classical and hybrid solvers."""
 
 from itertools import islice, pairwise
+import time
 
 import networkx as nx
+
+from virne.distributed.config import HYBRID_SOLVERS
 
 from virne.distributed.model import Allocation, EPSILON, edge_key
 
@@ -11,6 +14,8 @@ class EmbeddingValidator:
     def __init__(self, config):
         self.settings = config['solver']
         self.budget = None
+        self.capture_feedback = False
+        self.last_feedback = {}
 
     def _path(self, substrate, trial, source, target, demand):
         if source == target:
@@ -28,7 +33,7 @@ class EmbeddingValidator:
             filter_node=lambda n: graph.nodes[n]['kind'] != 'server' or n in (source, target),
             filter_edge=allowed_edge,
         )
-        energy_aware = self.settings['name'] in ('hre', 'ahq')
+        energy_aware = self.settings['name'] in ('hre', *HYBRID_SOLVERS)
         try:
             paths = []
             for path in islice(nx.shortest_simple_paths(
@@ -60,6 +65,8 @@ class EmbeddingValidator:
         return min(paths, key=cost)
 
     def _route(self, substrate, request, trial):
+        if self.capture_feedback:
+            self.last_feedback = {'snapshot_version': substrate.version, 'segments': []}
         endpoints = [request.ingress] + [trial.placement[i] for i in range(len(request.vnfs))]
         if request.return_to_ingress:
             endpoints.append(request.ingress)
@@ -72,18 +79,42 @@ class EmbeddingValidator:
             demand = request.bandwidths[index]
             path = self._path(substrate, trial, source, target, demand)
             if path is None:
+                if self.capture_feedback:
+                    self.last_feedback.update(reason='bandwidth', segment=index, source=source,
+                                              target=target, demand_mbps=demand)
                 return 'bandwidth'
             trial.reserve_path(index, path, demand)
-            trial.latency_ms += sum(substrate.graph.edges[u, v]['latency_ms'] for u, v in pairwise(path))
+            delay = sum(substrate.graph.edges[u, v]['latency_ms'] for u, v in pairwise(path))
+            trial.latency_ms += delay
+            if self.capture_feedback:
+                self.last_feedback['segments'].append({'segment': index, 'source': source,
+                                                       'target': target, 'delay_ms': delay})
             src_dc, dst_dc = (substrate.graph.nodes[n].get('dc') for n in (source, target))
             if src_dc is not None and dst_dc is not None and src_dc != dst_dc:
                 trial.inter_dc_virtual_links += 1
         if request.max_latency_ms is not None and trial.latency_ms > request.max_latency_ms + EPSILON:
+            if self.capture_feedback:
+                worst = max(self.last_feedback['segments'], key=lambda s: (s['delay_ms'], -s['segment']))
+                self.last_feedback.update(reason='latency', segment=worst['segment'],
+                                          source=worst['source'], target=worst['target'],
+                                          demand_mbps=request.bandwidths[worst['segment']])
             return 'latency'
         return None
 
     def evaluate(self, substrate, request, placement):
         """Evaluate a complete placement with fresh tentative reservations."""
+        if not self.capture_feedback:
+            return self._evaluate(substrate, request, placement)
+        started = time.perf_counter()
+        self.last_feedback = {'snapshot_version': substrate.version, 'segments': []}
+        try:
+            allocation, reason = self._evaluate(substrate, request, placement)
+            self.last_feedback['reason'] = reason
+            return allocation, reason
+        finally:
+            self.last_feedback['wall_time_ms'] = (time.perf_counter() - started) * 1000
+
+    def _evaluate(self, substrate, request, placement):
         if set(placement) != set(range(len(request.vnfs))):
             return None, 'compute'
         if not self.settings['allow_colocation'] and len(set(placement.values())) != len(placement):

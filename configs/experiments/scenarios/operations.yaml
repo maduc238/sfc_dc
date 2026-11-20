@@ -1,0 +1,8 @@
+schema_version: 1
+simulation: distributed_scenario
+study: ../distributed_study.yaml
+name: operations
+stage: holdout
+group: operations
+rhos: [0.6, 0.9, 1.2]
+references: [best_fit, validation_fixed, pace_sfc]

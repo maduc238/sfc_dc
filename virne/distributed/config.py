@@ -7,6 +7,9 @@ from pathlib import Path
 import yaml
 
 
+HYBRID_SOLVERS = ('ahq', 'validation_guided', 'pace_sfc')
+
+
 DEFAULTS = {
     'schema_version': 1,
     'simulation': 'distributed_dc',
@@ -22,6 +25,7 @@ DEFAULTS = {
     },
     'workload': {
         'num_requests': 200, 'arrival_rate_per_hour': 40.0, 'mean_lifetime_hours': 2.0,
+        'duration_hours': None, 'hourly_multipliers': [],
         'ingress_nodes': [0, 1, 2, 3], 'vnfs_per_request': [4, 12],
         'cpu': [1.2, 2.4], 'memory_gb': [2.0, 8.0], 'bandwidth_mbps': [10.0, 90.0],
         'max_latency_ms': [30.0, 120.0], 'processing_delay_ms': 0.25,
@@ -32,8 +36,16 @@ DEFAULTS = {
     'hybrid': {
         'incumbent_solver': 'hre', 'max_dcs': 2, 'neighborhood_size': 4,
         'candidates_per_vnf': 3, 'max_neighborhoods': 2, 'max_variables': 32,
-        'max_backend_calls': 2, 'max_validations': 256, 'budget_ms': 500.0,
+        'max_backend_calls': 2, 'max_validations': 256, 'validation_top_k': 0, 'budget_ms': 500.0,
         'optimize_existing': True,
+        'guided': {'enabled': False, 'feedback': True, 'adaptive_validation': True,
+                   'pressure_threshold': 0.75, 'bound_pruning': True,
+                   'controller_utilization_target': 0.8, 'fragmentation_reference_servers': 512,
+                   'fragmentation_weight': 2.0, 'profile_bins': 3,
+                   'validation_milestones': [4, 8, 16], 'feedback_penalty': 0.1,
+                   'minimum_observations': 12, 'exploration_interval': 64,
+                   'prior_improvement_probability': 0.25, 'prior_gain': 0.01,
+                   'prior_validation_ms': 4.0, 'time_weight': 0.02, 'stale_weight': 0.05},
         'objective': {'power_weight': 1.0, 'latency_weight': 1.0,
                       'power_reference_w': 1000.0, 'latency_reference_ms': 100.0},
         'policy': {'name': 'rule', 'static_backend': 'sa', 'quantum_backend': 'qaoa_sim',
@@ -42,6 +54,7 @@ DEFAULTS = {
                    'quantum_minimum_gain': 0.05, 'quantum_expected_ms': 100.0,
                    'model_path': ''},
         'exact': {'max_assignments': 4096},
+        'local_search': {'max_steps': 32, 'max_evaluations': 4096},
         'sa': {'reads': 24, 'sweeps': 80, 'beta_start': 0.1, 'beta_end': 5.0},
         'qaoa': {'max_variables': 16, 'layers': 1, 'evaluations': 12, 'shots': 128,
                  'readout_flip_probability': 0.0},
@@ -52,7 +65,7 @@ DEFAULTS = {
     'control_plane': {
         'enabled': True, 'workers': 2, 'decision_timeout_ms': 1000.0,
         'latency_mode': 'modeled', 'base_latency_ms': 1.0, 'validation_latency_ms': 0.1,
-        'backend_latency_ms': {'exact': 2.0, 'sa': 5.0, 'qaoa_sim': 25.0, 'qa': 100.0},
+        'backend_latency_ms': {'exact': 2.0, 'sa': 5.0, 'local_search': 2.0, 'qaoa_sim': 25.0, 'qa': 100.0},
         'trace_ms': [],
     },
     'migration': {
@@ -72,6 +85,8 @@ DEFAULTS = {
     'power': {'server_idle_w': 100.0, 'server_peak_w': 200.0, 'server_off_w': 0.0,
               'switch_idle_w': 39.0, 'switch_port_w': 0.9, 'switch_off_w': 0.0,
               'wan_always_on': True},
+    'measurement': {'warmup_hours': 0.0, 'bin_s': 3600.0},
+    'output': {'detail': 'full'},
 }
 
 
@@ -156,6 +171,24 @@ def validate_config(config):
     _number(work['num_requests'], 'workload.num_requests', integer=True, positive=True)
     for key in ('arrival_rate_per_hour', 'mean_lifetime_hours'):
         _number(work[key], f'workload.{key}', positive=True)
+    if work['duration_hours'] is not None:
+        _number(work['duration_hours'], 'workload.duration_hours', positive=True)
+        if config['control_plane']['latency_mode'] == 'trace':
+            raise ValueError('Duration-based workload does not support fixed-length controller traces')
+    factors = work['hourly_multipliers']
+    if not isinstance(factors, list) or (factors and len(factors) != 24):
+        raise ValueError('hourly_multipliers must be empty or contain 24 hourly rates')
+    for value in factors:
+        _number(value, 'workload.hourly_multipliers')
+    if factors and sum(factors) <= 0:
+        raise ValueError('Hourly traffic must have a positive daily intensity')
+    _number(config['measurement']['warmup_hours'], 'measurement.warmup_hours')
+    _number(config['measurement']['bin_s'], 'measurement.bin_s', positive=True)
+    if (work['duration_hours'] is not None
+            and config['measurement']['warmup_hours'] >= work['duration_hours']):
+        raise ValueError('Warm-up must be shorter than workload duration')
+    if config['output']['detail'] not in ('full', 'compact', 'summary'):
+        raise ValueError('output.detail must be full, compact or summary')
     ingress = work['ingress_nodes']
     if not isinstance(ingress, list) or not ingress or any(
         isinstance(n, bool) or not isinstance(n, int) or not 0 <= n < wan['num_nodes'] for n in ingress
@@ -172,8 +205,8 @@ def validate_config(config):
         if bounds[0] > bounds[1]:
             raise ValueError(f'workload.{key} bounds are reversed')
     _number(work['processing_delay_ms'], 'workload.processing_delay_ms')
-    if solver['name'] not in ('random', 'first_fit_decreasing', 'best_fit', 'hre', 'ahq'):
-        raise ValueError('solver.name must be random, first_fit_decreasing, best_fit, hre or ahq')
+    if solver['name'] not in ('random', 'first_fit_decreasing', 'best_fit', 'hre', *HYBRID_SOLVERS):
+        raise ValueError(f"Unsupported solver.name: {solver['name']}")
     if solver['scope'] not in ('single_dc', 'cross_dc'):
         raise ValueError('solver.scope must be single_dc or cross_dc')
     _number(solver['k_paths'], 'solver.k_paths', integer=True, positive=True)
@@ -200,6 +233,41 @@ def _validate_hybrid(config):
     for key in ('max_dcs', 'neighborhood_size', 'candidates_per_vnf', 'max_neighborhoods',
                 'max_variables', 'max_backend_calls', 'max_validations'):
         _number(h[key], f'hybrid.{key}', integer=True, positive=True)
+    _number(h['validation_top_k'], 'hybrid.validation_top_k', integer=True)
+    g = h['guided']
+    for key in ('enabled', 'feedback', 'adaptive_validation', 'bound_pruning'):
+        if type(g[key]) is not bool:
+            raise ValueError(f'hybrid.guided.{key} must be a YAML boolean')
+    guided = g['enabled'] or config['solver']['name'] in ('validation_guided', 'pace_sfc')
+    _number(g['pressure_threshold'], 'guided.pressure_threshold')
+    if g['pressure_threshold'] > 1:
+        raise ValueError('guided.pressure_threshold must be in [0, 1]')
+    _number(g['controller_utilization_target'], 'guided.controller_utilization_target', positive=True)
+    if g['controller_utilization_target'] > 1:
+        raise ValueError('guided.controller_utilization_target must be in (0, 1]')
+    _number(g['fragmentation_reference_servers'], 'guided.fragmentation_reference_servers', integer=True, positive=True)
+    if config['solver']['name'] == 'pace_sfc' and (h['qa']['enabled']
+            or h['policy']['static_backend'] == 'qa' or h['policy']['quantum_backend'] == 'qa'):
+        raise ValueError('PACE-SFC supports CPU backends only')
+    for key in ('fragmentation_weight', 'feedback_penalty', 'prior_gain', 'time_weight', 'stale_weight'):
+        _number(g[key], f'hybrid.guided.{key}')
+    for key in ('profile_bins', 'minimum_observations', 'exploration_interval'):
+        _number(g[key], f'hybrid.guided.{key}', integer=True, positive=True)
+    if g['profile_bins'] > 8:
+        raise ValueError('guided.profile_bins must not exceed 8')
+    _number(g['prior_validation_ms'], 'guided.prior_validation_ms', positive=True)
+    _number(g['prior_improvement_probability'], 'guided.prior_improvement_probability')
+    if g['prior_improvement_probability'] > 1:
+        raise ValueError('guided.prior_improvement_probability must be in [0, 1]')
+    milestones = g['validation_milestones']
+    if (not isinstance(milestones, list) or not milestones
+            or any(type(v) is not int or v < 1 for v in milestones)
+            or milestones != sorted(set(milestones))):
+        raise ValueError('guided.validation_milestones must be strictly increasing positive integers')
+    if guided and milestones[-1] != h['max_validations']:
+        raise ValueError('guided final milestone must equal hybrid.max_validations')
+    if guided and h['incumbent_solver'] != 'best_fit':
+        raise ValueError('Guided search requires a Best-Fit incumbent')
     for label, value in [('hybrid.budget_ms', h['budget_ms']),
                          ('control_plane.decision_timeout_ms', control['decision_timeout_ms'])]:
         _number(value, label, positive=True)
@@ -208,10 +276,10 @@ def _validate_hybrid(config):
             raise ValueError('hybrid/control flags must be YAML booleans')
     if h['incumbent_solver'] not in ('hre', 'best_fit', 'first_fit_decreasing'):
         raise ValueError('Invalid hybrid.incumbent_solver')
-    if config['solver']['name'] == 'ahq' and (
+    if config['solver']['name'] in HYBRID_SOLVERS and (
         config['solver']['scope'] != 'single_dc' or config['solver']['allow_colocation']
     ):
-        raise ValueError('AHQ v1 requires single_dc and allow_colocation: false')
+        raise ValueError('Hybrid embedding requires single_dc and allow_colocation: false')
     for key, value in h['objective'].items():
         _number(value, f'hybrid.objective.{key}', positive='reference' in key)
     if h['objective']['power_weight'] + h['objective']['latency_weight'] <= 0:
@@ -219,7 +287,7 @@ def _validate_hybrid(config):
     policy = h['policy']
     if policy['name'] not in ('rule', 'static', 'learned'):
         raise ValueError('hybrid.policy.name must be rule, static or learned')
-    if policy['static_backend'] not in ('exact', 'sa', 'qaoa_sim', 'qa'):
+    if policy['static_backend'] not in ('exact', 'sa', 'local_search', 'qaoa_sim', 'qa'):
         raise ValueError('Invalid static_backend')
     if policy['quantum_backend'] not in ('qaoa_sim', 'qa'):
         raise ValueError('quantum_backend must be qaoa_sim or qa')
@@ -231,6 +299,8 @@ def _validate_hybrid(config):
     if not isinstance(policy['model_path'], str) or (policy['name'] == 'learned' and not policy['model_path']):
         raise ValueError('Learned policy requires model_path')
     _number(h['exact']['max_assignments'], 'exact.max_assignments', integer=True, positive=True)
+    for key in ('max_steps', 'max_evaluations'):
+        _number(h['local_search'][key], f'local_search.{key}', integer=True, positive=True)
     for section, fields in [('sa', ('reads', 'sweeps')), ('qaoa', ('max_variables', 'layers', 'evaluations', 'shots')),
                             ('qa', ('num_reads',))]:
         for key in fields:
@@ -308,6 +378,16 @@ def load_config(path):
     # Explicit marker prevents accidentally treating an old Hydra file as a DC experiment.
     if not isinstance(supplied, dict) or supplied.get('simulation') != 'distributed_dc':
         raise ValueError('The YAML file must declare simulation: distributed_dc')
+    # Archived resolved YAMLs used a numeric selector. Normalize on input only.
+    hybrid = supplied.get('hybrid')
+    guided = hybrid.get('guided') if isinstance(hybrid, dict) else None
+    if isinstance(guided, dict) and 'version' in guided:
+        selector = guided.pop('version')
+        if type(selector) is not int or selector not in (2, 3):
+            raise ValueError('Unsupported archived guided solver selector')
+        solver = supplied.get('solver')
+        if isinstance(solver, dict) and solver.get('name') == 'ahq' and guided.get('enabled'):
+            solver['name'] = 'pace_sfc' if selector == 3 else 'validation_guided'
     config = validate_config(_merge(DEFAULTS, supplied))
     model_path = config['hybrid']['policy']['model_path']
     if model_path and not Path(model_path).is_absolute():

@@ -27,23 +27,38 @@ def incremental_server_power(substrate, host, cpu):
     return dynamic + (p['server_idle_w'] - p['server_off_w'] if substrate.cpu[host] <= EPSILON else 0)
 
 
-def neighborhoods(substrate, request, incumbent, settings, budget):
+def neighborhoods(substrate, request, incumbent, settings, budget, feedback=None, attempt=0,
+                  host_cost=None, screen=None):
     """Try DCs for each bounded window; freeze other VNFs with CPU/RAM first-fit.
 
     When no incumbent exists, a compute-only seed may be partial. Every unplaced
     VNF must be included in the window; otherwise that neighborhood is skipped.
     """
     graph = substrate.graph
-    distance = nx.single_source_dijkstra_path_length(graph, request.ingress, weight='latency_ms')
-    by_dc = {}
-    for host in substrate.servers:
-        by_dc.setdefault(graph.nodes[host]['dc'], []).append(host)
+    if screen is None:
+        distance = nx.single_source_dijkstra_path_length(graph, request.ingress, weight='latency_ms')
+        by_dc = {}
+        for host in substrate.servers:
+            by_dc.setdefault(graph.nodes[host]['dc'], []).append(host)
+    else:
+        distance = screen.topology.distances(request.ingress)
+        by_dc = screen.topology.by_dc
     dcs = sorted(by_dc, key=lambda dc: (min(distance[h] for h in by_dc[dc]), dc))
     if incumbent is not None:
         home = graph.nodes[next(iter(incumbent.placement.values()))]['dc']
         dcs.remove(home)
         dcs.insert(0, home)
-    dcs = dcs[:settings['max_dcs']]
+    feedback = feedback or {}
+    if screen is None or not screen.feedback:
+        dcs = dcs[:settings['max_dcs']]
+    if feedback.get('segment') == 0 and feedback.get('dc') in dcs:
+        # A failed ingress segment is a search hint, never a proof that this DC is infeasible.
+        failed_dc = feedback['dc']
+        dcs = [dc for dc in dcs if dc != failed_dc] + [failed_dc]
+    if screen is not None and screen.feedback:
+        dcs = screen.select_dcs(dcs, settings['max_dcs'])
+        if not dcs:
+            return
     seeds = {}
     reachability = {}
 
@@ -87,16 +102,32 @@ def neighborhoods(substrate, request, incumbent, settings, budget):
             seed = seeds[dc]
             missing = set(range(count)) - seed.keys()
             if len(missing) > width:
+                if screen is not None:
+                    screen.stats['empty_compute_windows'] += 1
+                    screen.last_failure = 'compute'
                 continue
             # Prioritize fixing unplaced nodes; expand around them where possible.
             start = starts[round_index % len(starts)]
             selected = set(range(start, start + width)) | missing
+            segment = feedback.get('segment')
+            if screen is not None and screen.feedback:
+                segment = screen.focus_by_dc.get(dc, segment)
+            if segment is not None:
+                focus = {i for i in (segment - 1, segment) if 0 <= i < count}
+                selected |= focus
+            else:
+                focus = set()
             while len(selected) > width:
-                selected.remove(max(selected - missing, key=lambda i: (scarcity[i], i)))
+                removable = selected - missing - focus
+                if not removable:
+                    removable = selected - missing
+                selected.remove(max(removable, key=lambda i: (scarcity[i], i)))
             signature = (dc, tuple(sorted(selected)))
             if signature in emitted:
                 continue
             emitted.add(signature)
+            if screen is not None and dc in screen.focus_by_dc:
+                screen.stats['refocused_windows'] += 1
             fixed = {i: h for i, h in seed.items() if i not in selected}
             if len(fixed) + len(selected) != count:
                 continue
@@ -112,25 +143,41 @@ def neighborhoods(substrate, request, incumbent, settings, budget):
                 # Full joint routing remains the validator's responsibility.
                 boundaries = []
                 if index == 0:
-                    boundaries.append((request.ingress, request.bandwidths[0]))
+                    boundaries.append((request.ingress, 0))
                 elif index - 1 in fixed:
-                    boundaries.append((fixed[index - 1], request.bandwidths[index]))
+                    boundaries.append((fixed[index - 1], index))
                 if index + 1 in fixed:
-                    boundaries.append((fixed[index + 1], request.bandwidths[index + 1]))
+                    boundaries.append((fixed[index + 1], index + 1))
                 if index == count - 1 and request.return_to_ingress:
-                    boundaries.append((request.ingress, request.bandwidths[-1]))
-                feasible = [h for h in feasible if all(reachable(h, target, bw) for target, bw in boundaries)]
+                    boundaries.append((request.ingress, count))
+                if screen is None:
+                    feasible = [h for h in feasible if all(
+                        reachable(h, target, request.bandwidths[s]) for target, s in boundaries)]
+                else:
+                    feasible = screen.filter_hosts(dc, feasible, boundaries)
+                    if not feasible:
+                        candidates[index] = []
+                        break
                 original_count += len(feasible)
-                feasible.sort(key=lambda h: (incremental_server_power(substrate, h, request.vnfs[index].cpu),
+                feasible.sort(key=lambda h: (incremental_server_power(substrate, h, request.vnfs[index].cpu)
+                                             + (host_cost(index, h) if host_cost else 0),
                                              distance[h], h))
                 # Different offsets avoid giving every VNF exactly the same three hosts.
                 best = feasible[:settings['candidates_per_vnf']]
                 if feasible:
-                    diverse = feasible[index % len(feasible)]
+                    diverse = feasible[(index + attempt) % len(feasible)]
                     if diverse not in best:
                         best[-1] = diverse
                 if index in seed and seed[index] in feasible and seed[index] not in best:
                     best[-1] = seed[index]
+                if attempt and len(feasible) > len(best):
+                    # Retain the seed AND explore a different host. Otherwise
+                    # seed insertion can overwrite the only diverse candidate.
+                    alternatives = feasible[(index + attempt) % len(feasible):] + feasible[:(index + attempt) % len(feasible)]
+                    replacement = next((h for h in alternatives if h not in best), None)
+                    slots = [j for j, h in enumerate(best) if h != seed.get(index)]
+                    if replacement is not None and slots:
+                        best[slots[-1]] = replacement
                 candidates[index] = best
             if not all(candidates.values()):
                 continue
@@ -138,7 +185,7 @@ def neighborhoods(substrate, request, incumbent, settings, budget):
             yield Neighborhood(dc, fixed, candidates, warm, original_count)
 
 
-def features(substrate, request, neighborhood, incumbent, settings):
+def features(substrate, request, neighborhood, incumbent, settings, cpu_utilization=None):
     sets = [set(c) for c in neighborhood.candidates.values()]
     union = set().union(*sets)
     total = sum(len(c) for c in sets)
@@ -155,7 +202,7 @@ def features(substrate, request, neighborhood, incumbent, settings):
         'variables': total,
         'assignments': neighborhood.assignment_count,
         'candidate_overlap': 1 - len(union) / total,
-        'cpu_utilization': substrate.snapshot()['cpu_utilization'],
+        'cpu_utilization': substrate.snapshot()['cpu_utilization'] if cpu_utilization is None else cpu_utilization,
         'bandwidth_headroom': min(bandwidth_headroom, default=1.0),
         'sla_slack': slack,
         'candidate_retention': total / neighborhood.original_candidates,

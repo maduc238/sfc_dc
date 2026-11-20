@@ -1,0 +1,9 @@
+schema_version: 1
+simulation: distributed_scenario
+study: ../distributed_study.yaml
+name: memory
+stage: diagnostic
+methods: [best_fit, pace_sfc, pace_fixed, pace_fixed_no_fragmentation]
+rhos: [0.9, 1.2]
+references: [best_fit, pace_fixed]
+profile: ram24

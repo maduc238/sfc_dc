@@ -40,8 +40,28 @@ def generate_requests(config):
     w = config['workload']
     now = 0.0
     requests = []
-    for i in range(w['num_requests']):
-        now += rng.expovariate(w['arrival_rate_per_hour'] / 3600.0)
+    duration = w['duration_hours'] * 3600 if w['duration_hours'] is not None else None
+    i = 0
+    while duration is not None or i < w['num_requests']:
+        if not w['hourly_multipliers']:
+            now += rng.expovariate(w['arrival_rate_per_hour'] / 3600.0)
+        else:
+            # Invert integrated intensity of a piecewise-constant daily Poisson process.
+            hazard = rng.expovariate(1.0)
+            while True:
+                hour = int(now // 3600)
+                boundary = (hour + 1) * 3600.0
+                rate = w['arrival_rate_per_hour'] * w['hourly_multipliers'][hour % 24] / 3600
+                available = (boundary - now) * rate
+                if rate > 0 and hazard < available:
+                    now += hazard / rate
+                    break
+                hazard -= available
+                now = boundary
+                if duration is not None and now >= duration:
+                    break
+        if duration is not None and now >= duration:
+            break
         lifetime = rng.expovariate(1.0 / (w['mean_lifetime_hours'] * 3600.0))
         ingress = f"wan/{rng.choice(w['ingress_nodes'])}"
         count = rng.randint(*w['vnfs_per_request'])
@@ -51,6 +71,7 @@ def generate_requests(config):
         latency = rng.uniform(*w['max_latency_ms']) if w['max_latency_ms'] is not None else None
         requests.append(Request(i, now, lifetime, ingress, vnfs, bandwidths, latency,
                                 w['processing_delay_ms'], w['return_to_ingress']))
+        i += 1
     return requests
 
 
@@ -162,6 +183,8 @@ class Substrate:
         self.cpu = dict.fromkeys(self.servers, 0.0)
         self.memory = dict.fromkeys(self.servers, 0.0)
         self.bandwidth = dict.fromkeys((edge_key(*e) for e in self.graph.edges), 0.0)
+        self.fabric_links = [(edge_key(u, v), attrs) for u, v, attrs in self.graph.edges(data=True)
+                             if attrs['kind'] in ('fabric', 'access')]
         self.active = {}
         self.reservations = {}
         self.paused_cpu = dict.fromkeys(self.servers, 0.0)
@@ -289,6 +312,9 @@ class Substrate:
             'memory_utilization': sum(self.memory.values()) / mem_capacity,
             'wan_bandwidth_mbps_hops': sum(self.bandwidth[e] for e in wan_edges),
             'wan_utilization': sum(self.bandwidth[e] for e in wan_edges) / wan_capacity if finite_wan else None,
+            'peak_fabric_link_utilization': max(
+                (self.bandwidth[e] / attrs['capacity_mbps'] for e, attrs in self.fabric_links
+                 if attrs['capacity_mbps'] is not None), default=None),
             'server_power_w': server_w, 'network_power_w': switch_w, 'power_w': server_w + switch_w,
             'active_migrations': len(self.reservations),
             'migration_reserved_cpu': sum(standby.values()),

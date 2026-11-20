@@ -1,0 +1,10 @@
+schema_version: 1
+simulation: distributed_scenario
+study: ../distributed_study.yaml
+name: controller
+stage: burst
+methods: [best_fit, validation_adaptive, validation_fixed, pace_sfc]
+rhos: [1.2, 2.4]
+references: [best_fit, pace_sfc]
+profile: short_lived
+jobs: 1

@@ -1,0 +1,24 @@
+# The distributed study supplies the matched 512-server network and traffic.
+schema_version: 1
+simulation: distributed_dc
+experiment: {name: distributed_pace_fixed_no_fragmentation, seed: 42, output_dir: results/hybrid}
+solver: {name: pace_sfc, scope: single_dc, allow_colocation: false, k_paths: 4}
+hybrid:
+  incumbent_solver: best_fit
+  max_backend_calls: 2
+  max_validations: 16
+  budget_ms: 500.0
+  guided:
+    enabled: true
+    adaptive_validation: false
+    pressure_threshold: 0.75
+    bound_pruning: false
+    feedback: true
+    controller_utilization_target: 0.8
+    fragmentation_weight: 0
+    fragmentation_reference_servers: 512
+    validation_milestones: [4, 8, 16]
+  policy: {name: rule, static_backend: exact, quantum_backend: qaoa_sim}
+  qa: {enabled: false}
+migration: {enabled: true}
+output: {detail: summary}

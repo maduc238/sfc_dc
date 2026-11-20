@@ -41,7 +41,8 @@ class PlacementQUBO:
         return {**{(i, i): value for i, value in self.linear.items()}, **self.quadratic}
 
 
-def build_qubo(substrate, request, neighborhood, settings, budget):
+def build_qubo(substrate, request, neighborhood, settings, budget, host_cost=None, pair_costs=None,
+               distance_from=None):
     variables = [(v, h) for v, hosts in sorted(neighborhood.candidates.items()) for h in hosts]
     linear = dict.fromkeys(range(len(variables)), 0.0)
     quadratic = {}
@@ -50,6 +51,8 @@ def build_qubo(substrate, request, neighborhood, settings, budget):
     for i, (v, h) in enumerate(variables):
         linear[i] = (objective['power_weight'] * incremental_server_power(substrate, h, request.vnfs[v].cpu)
                      / objective['power_reference_w'])
+        if host_cost is not None:
+            linear[i] += host_cost(v, h)
     graph = substrate.graph
     distances = {}
 
@@ -57,7 +60,8 @@ def build_qubo(substrate, request, neighborhood, settings, budget):
         # Server leaves cannot be intermediate nodes in these generated fabrics.
         if source not in distances:
             budget.check()
-            distances[source] = nx.single_source_dijkstra_path_length(graph, source, weight='latency_ms')
+            distances[source] = (distance_from(source) if distance_from is not None else
+                                 nx.single_source_dijkstra_path_length(graph, source, weight='latency_ms'))
         return distances[source][target] * objective['latency_weight'] / objective['latency_reference_ms']
 
     def choices(v):
@@ -79,6 +83,24 @@ def build_qubo(substrate, request, neighborhood, settings, budget):
                     k = i if i is not None else j
                     linear[k] += cost
                 # Constant fixed placement/processing cost does not affect ranking.
+    for (left, source, right, target), cost in (pair_costs or {}).items():
+        terms = []
+        applicable = True
+        for v, host in ((left, source), (right, target)):
+            if v == -1:
+                applicable = applicable and host == request.ingress
+            elif v in neighborhood.fixed:
+                applicable = applicable and neighborhood.fixed[v] == host
+            elif (v, host) in index:
+                terms.append(index[v, host])
+            else:
+                applicable = False
+        if applicable and len(terms) == 1:
+            linear[terms[0]] += cost
+        elif applicable and len(terms) == 2:
+            key = tuple(sorted(terms))
+            quadratic[key] = quadratic.get(key, 0.0) + cost
+    # Recompute the one-hot/distinct-host penalty after all guidance costs.
     bound = sum(abs(v) for v in linear.values()) + sum(abs(v) for v in quadratic.values())
     penalty = bound + 1.0
     offset = penalty * len(neighborhood.candidates)

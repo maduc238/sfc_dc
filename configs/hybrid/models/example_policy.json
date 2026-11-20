@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "features": [
+    "bias",
+    "has_incumbent",
+    "log_assignments",
+    "candidate_overlap",
+    "cpu_utilization",
+    "bandwidth_headroom",
+    "sla_slack",
+    "candidate_retention"
+  ],
+  "weights": {
+    "exact": [
+      -0.12113956792824077,
+      -0.03370796254759077,
+      -0.031639782510662594,
+      0.16426237917847225,
+      0.012957551993433037,
+      -0.001987878179938019,
+      -0.02633753215384567,
+      0.04155914988978203
+    ],
+    "sa": [
+      -0.06291762495569236,
+      -0.019372322638304906,
+      -0.15535404938578973,
+      0.015598488797351923,
+      0.004248183322388677,
+      -0.002340309016432042,
+      -0.0006537501303294659,
+      0.03802610903018067
+    ],
+    "qaoa_sim": [
+      -0.09117159384021835,
+      -0.015645051803376036,
+      -0.06285975576018955,
+      0.12212460332468085,
+      0.1264994206685891,
+      -0.021163464706943757,
+      -0.07510093280900806,
+      -0.006392687397159607
+    ]
+  },
+  "training_counts": {
+    "exact": 310,
+    "sa": 365,
+    "qaoa_sim": 270
+  },
+  "ridge": 1.0,
+  "method": "offline_ridge_action_value",
+  "updates_during_evaluation": false,
+  "training_sha256": "b98828405cfae634e11039fa344ff4f0e0c36846e87d97f79a0231f426bc4045",
+  "training_log_count": 6,
+  "example_only": true,
+  "training_seeds": [
+    11,
+    22
+  ],
+  "training_workload": "Synthetic five-router WAN; 4 DCs; 64 servers; 100 requests per run.",
+  "collection": "Observational static exact/SA/QAOA runs; not counterfactual or an advantage claim."
+}

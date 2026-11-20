@@ -1,0 +1,9 @@
+schema_version: 1
+simulation: distributed_scenario
+study: ../distributed_study.yaml
+name: fabric
+stage: diagnostic
+methods: [best_fit, pace_sfc, pace_fixed, pace_fixed_no_feedback]
+rhos: [0.9, 1.2]
+references: [best_fit, pace_fixed]
+profile: fabric400

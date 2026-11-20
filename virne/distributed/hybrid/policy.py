@@ -9,7 +9,7 @@ from pathlib import Path
 
 FEATURE_NAMES = ['bias', 'has_incumbent', 'log_assignments', 'candidate_overlap',
                  'cpu_utilization', 'bandwidth_headroom', 'sla_slack', 'candidate_retention']
-ACTIONS = ('keep', 'exact', 'sa', 'qaoa_sim', 'qa')
+ACTIONS = ('keep', 'exact', 'sa', 'local_search', 'qaoa_sim', 'qa')
 
 
 def vector(features):

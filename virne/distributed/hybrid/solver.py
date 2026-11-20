@@ -1,6 +1,7 @@
 """AHQ-SFC: bounded neighborhood optimization with a shared feasibility validator."""
 
 from copy import deepcopy
+from contextlib import contextmanager
 import time
 
 from virne.distributed.hybrid.backends import BackendPool
@@ -10,6 +11,25 @@ from virne.distributed.hybrid.policy import SelectionPolicy
 from virne.distributed.hybrid.qubo import build_qubo, true_objective
 from virne.distributed.solver import HeuristicSolver
 from virne.distributed.validation import EmbeddingValidator
+
+
+@contextmanager
+def _phase(times, name):
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        times[name] += (time.perf_counter() - started) * 1000
+
+
+def _timed_neighborhoods(iterator, times):
+    while True:
+        try:
+            with _phase(times, 'candidate'):
+                group = next(iterator)
+        except StopIteration:
+            return
+        yield group
 
 
 class HybridSolver:
@@ -37,15 +57,20 @@ class HybridSolver:
         validations = 0
         budget_hit = False
         selected_policies = []
+        phases = dict.fromkeys(('incumbent', 'candidate', 'qubo'), 0.0)
         try:
-            incumbent, reason = self.incumbent_solver.solve(substrate, request, budget)
+            with _phase(phases, 'incumbent'):
+                incumbent, reason = self.incumbent_solver.solve(substrate, request, budget)
             best = incumbent
             score = true_objective(substrate, best, self.settings) if best else None
             if incumbent is not None and not self.settings['optimize_existing']:
                 selected_policies.append('incumbent_sufficient')
             else:
-                for neighborhood in neighborhoods(substrate, request, incumbent, self.settings, budget):
-                    if len(self.last_calls) >= self.settings['max_backend_calls']:
+                groups = _timed_neighborhoods(iter(neighborhoods(substrate, request, incumbent, self.settings, budget)), phases)
+                while len(self.last_calls) < self.settings['max_backend_calls']:
+                    try:
+                        neighborhood = next(groups)
+                    except StopIteration:
                         break
                     budget.check()
                     info = features(substrate, request, neighborhood, best, self.settings)
@@ -56,7 +81,8 @@ class HybridSolver:
                     selected_policies.append(selection_reason)
                     if backend == 'keep':
                         break
-                    qubo = build_qubo(substrate, request, neighborhood, self.settings, budget)
+                    with _phase(phases, 'qubo'):
+                        qubo = build_qubo(substrate, request, neighborhood, self.settings, budget)
                     backend_queue = [(backend, selection_reason)]
                     while backend_queue and len(self.last_calls) < self.settings['max_backend_calls']:
                         action, action_reason = backend_queue.pop(0)
@@ -80,14 +106,20 @@ class HybridSolver:
             budget_hit = True
         if incumbent is not None and best is not incumbent:
             self.fallback_allocations = [incumbent]
+        improved = (incumbent is not None and best is not None
+                    and score < true_objective(substrate, incumbent, self.settings) - 1e-12)
+        elapsed = (time.perf_counter() - started) * 1000
+        phases['sampling'] = sum(c['metadata'].get('wall_time_ms', 0) for c in self.last_calls)
+        phases['validation'] = sum(c['validation_ms'] for c in self.last_calls)
+        phases['other'] = max(0.0, elapsed - sum(phases.values()))
         self.last_decision = {
             'request_id': request.id, 'incumbent_feasible': incumbent is not None,
             'rescued': incumbent is None and best is not None,
-            'improved': incumbent is not None and best is not None and score < true_objective(substrate, incumbent, self.settings) - 1e-12,
+            'improved': improved,
             'best_true_objective': score, 'backend_calls': len(self.last_calls),
             'budget_exhausted': budget_hit or budget.expired, 'validation_attempts': validations,
             'policy_reasons': selected_policies, 'snapshot_version': substrate.version,
-            'wall_time_ms': (time.perf_counter() - started) * 1000,
+            'wall_time_ms': elapsed, 'phase_times_ms': phases,
         }
         return best, None if best is not None else ('budget' if budget_hit or budget.expired else reason or 'compute')
 
@@ -115,13 +147,17 @@ class HybridSolver:
         }
         self.last_calls.append(record)
         started = time.perf_counter()
-        fully_validated = True
         reason = None
         decoded = [(sample, qubo.decode(sample.bits)) for sample in result.samples]
         record['placement_feasible_samples'] = sum(s.occurrences for s, placement in decoded if placement is not None)
-        for sample, placement in decoded:
-            if placement is None:
-                continue
+        eligible = sorted(((sample, placement) for sample, placement in decoded if placement is not None),
+                          key=lambda item: (item[0].energy, item[0].bits))
+        limit = self.settings['validation_top_k']
+        truncated = bool(limit and len(eligible) > limit)
+        record['validation_top_k'] = limit
+        record['validation_candidates_truncated'] = truncated
+        fully_validated = not truncated
+        for sample, placement in (eligible[:limit] if limit else eligible):
             if budget.expired or validations >= self.settings['max_validations']:
                 fully_validated = False
                 break

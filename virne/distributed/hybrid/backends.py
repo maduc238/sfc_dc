@@ -86,6 +86,62 @@ def sa_sample(qubo, settings, seed, budget):
                           'coefficient_scale': scale, 'warm_started': True})
 
 
+def local_search_sample(qubo, settings, seed, budget):
+    """Feasible coordinate descent plus pair swaps on the SAME reduced QUBO."""
+    variables = sorted(qubo.neighborhood.candidates)
+    placement = dict(qubo.neighborhood.warm_start)
+    evaluations = 0
+    if qubo.decode(qubo.encode(placement)) is None:
+        placement = None
+        for hosts in product(*(qubo.neighborhood.candidates[v] for v in variables)):
+            if budget.expired or evaluations >= settings['max_evaluations']:
+                break
+            evaluations += 1
+            trial = {**qubo.neighborhood.fixed, **dict(zip(variables, hosts))}
+            if len(set(trial.values())) == len(trial):
+                placement = trial
+                break
+    found = {}
+    steps = 0
+    converged = False
+    if placement is not None:
+        bits = qubo.encode(placement)
+        value = qubo.energy(bits)
+        found[bits] = value
+        while steps < settings['max_steps'] and not budget.expired:
+            candidates = []
+            for v in variables:
+                for host in qubo.neighborhood.candidates[v]:
+                    if host not in placement.values():
+                        candidates.append({**placement, v: host})
+            for i, v in enumerate(variables):
+                for w in variables[i + 1:]:
+                    if (placement[w] in qubo.neighborhood.candidates[v]
+                            and placement[v] in qubo.neighborhood.candidates[w]):
+                        candidates.append({**placement, v: placement[w], w: placement[v]})
+            best, best_value = None, value
+            for trial in candidates:
+                if budget.expired or evaluations >= settings['max_evaluations']:
+                    break
+                evaluations += 1
+                trial_value = qubo.energy(qubo.encode(trial))
+                if trial_value < best_value - 1e-12:
+                    best, best_value = trial, trial_value
+            if best is None:
+                converged = not budget.expired and evaluations < settings['max_evaluations']
+                break
+            placement, value = best, best_value
+            found[qubo.encode(placement)] = value
+            steps += 1
+            if evaluations >= settings['max_evaluations']:
+                break
+    samples = [Sample(bits, value) for bits, value in sorted(found.items(), key=lambda p: (p[1], p[0]))]
+    status = 'complete' if converged else 'budget_exhausted'
+    return BackendResult('local_search', 'classical', status, samples,
+                         {'evaluations': evaluations, 'steps': steps, 'local_minimum': converged,
+                          'optimality_scope': 'coordinate_and_pair_swap_neighborhood_only'})
+
+
 def qaoa_statevector(energies, gammas, betas, budget=None):
     """Apply exp(-i gamma H_QUBO), exp(-i beta sum X) to |+>^n.
 
@@ -221,7 +277,7 @@ class BackendPool:
                     and self.estimated_cost + q['estimated_cost_per_call'] <= q['max_cost_per_run'] + 1e-12)
         if name == 'qaoa_sim':
             return variables <= self.settings['qaoa']['max_variables']
-        return name in ('exact', 'sa')
+        return name in ('exact', 'sa', 'local_search')
 
     def sample(self, name, qubo, request_id, call_id, budget):
         started = time.perf_counter()
@@ -232,6 +288,8 @@ class BackendPool:
             result = exact_sample(qubo, self.settings['exact'], seed, budget)
         elif name == 'sa':
             result = sa_sample(qubo, self.settings['sa'], seed, budget)
+        elif name == 'local_search':
+            result = local_search_sample(qubo, self.settings['local_search'], seed, budget)
         elif name == 'qaoa_sim':
             result = qaoa_sample(qubo, self.settings['qaoa'], seed, budget)
         else:

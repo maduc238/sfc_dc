@@ -2,6 +2,8 @@
 
 AHQ-SFC hiện chạy trên CPU, xem [hướng dẫn chạy](ahq-sfc-running.md). Thành phần quantum trong thí nghiệm là QAOA statevector bằng NumPy. Adapter D-Wave có trong code nhưng nằm ngoài phạm vi thí nghiệm CPU. Mọi baseline dùng cùng controller, cơ chế migration và cost vận hành theo [mô hình hệ thống](distributed-data-centers.md).
 
+Phương pháp đề xuất mang tên **PACE-SFC**. Nó dùng Best-Fit để tạo phương án ban đầu, đo áp lực tài nguyên và chỉ tìm đường cho các cách đặt còn khả năng cải thiện điểm hiện tại. Bộ thí nghiệm chạy từ một YAML trên 8 DC với tổng cộng 512 server. [Thuật toán, kịch bản và lệnh chạy PACE-SFC](pace-sfc.md).
+
 Chọn orchestration thích ứng làm kiến trúc chính và dùng hierarchical decomposition để tạo subproblem QUBO có ngân sách. Orchestrator chọn exact enumeration, simulated annealing hoặc QAOA simulator. Placement, routing, kiểm tra ràng buộc và mô phỏng QAOA đều thực thi trên CPU.
 
 ## Phạm vi hệ thống
